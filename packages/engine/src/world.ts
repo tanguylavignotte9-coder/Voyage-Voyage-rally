@@ -107,6 +107,7 @@ export class WorldGenerator {
   rng: Rng;
   noise: Noise2D;
   wetNoise: Noise2D;
+  detailNoise: Noise2D;
   totalKm: number;
   points: PathPoint[] = [];
   biomeZones: BiomeZone[] = [];
@@ -115,6 +116,7 @@ export class WorldGenerator {
   rivers: { km: number; x: number; y: number; name: string }[] = [];
   bridges: { km: number; x: number; y: number; name: string }[] = [];
   segments: TerrainSegment[] = [];
+  private altCache = new Map<string, number>();
   private endX: number;
   private endY: number;
 
@@ -123,6 +125,9 @@ export class WorldGenerator {
     this.noise = new Noise2D(this.rng);
     // deuxième bruit indépendant pour la difficulté (détaché du relief)
     this.wetNoise = new Noise2D(this.rng);
+    // aspérités à l'échelle des virages (100-800 m): le guide les contourne —
+    // c'est là que les virages émergent, sans casser les pentes réelles.
+    this.detailNoise = new Noise2D(this.rng);
     this.totalKm = Math.round(params.targetHours * 50 * this.rng.range(0.85, 1.15));
 
     // Les zones de biomes sont une BANDE NORD-SUD: le tracé A→B les traverse
@@ -167,21 +172,51 @@ export class WorldGenerator {
     this.buildSegments();
   }
 
+  private km0(x: number, y: number, totalM: number, totalKm: number): number {
+    return (Math.hypot(x, y) / totalM) * totalKm;
+  }
+
+  // facteur d'errance latérale par biome (steppe = droite, montagne = serpente)
+  private biomeLateralFactor(km: number): number {
+    const b = this.biomeAt(km);
+    return b === "steppe" ? 0.35 : b === "montagne" ? 1.4 : b === "humide" ? 1.0 : 0.8;
+  }
+
   biomeAt(km: number): Biome {
     for (const z of this.biomeZones) if (km >= z.startKm && km < z.endKm) return z.biome;
     return this.biomeZones[this.biomeZones.length - 1].biome;
   }
 
-  // altitude du paysage
-  altAt(x: number, y: number): number {
-    const km = (Math.hypot(x, y) / (this.totalKm * 1000)) * this.totalKm;
+  // altitude du paysage — LISSÉE à grande échelle: on échantillonne le bruit
+  // avec des octaves graves uniquement et sur une grille éparsée interpolée.
+  // Résultat: des collines et vallées réelles (pentes 5-80‰), pas du grésil.
+  private altCell(x: number, y: number): number {
+    const gx = Math.floor(x / 500), gy = Math.floor(y / 500);
+    const key = gx + "," + gy;
+    const cached = this.altCache.get(key);
+    if (cached !== undefined) return cached;
+    const km = (Math.hypot(gx * 500, gy * 500) / (this.totalKm * 1000)) * this.totalKm;
     const biome = this.biomeAt(km);
     const cfg = BIOME_RELIEF[biome];
-    const n = this.noise.fbm(x, y, cfg.scale, 4);
+    // 2 octaves graves seulement (le détail fin est l'ennemi des pentes réelles)
+    const n = this.noise.fbm(gx * 500, gy * 500, cfg.scale, 2);
     const base = cfg.altBase + (n - 0.5) * 2 * cfg.amp;
-    // continentalité: montée douce vers l'intérieur
-    const t = Math.min(1, Math.hypot(x, y) / (this.totalKm * 1000));
-    return Math.max(0, base * (0.4 + 0.6 * t) + cfg.altBase * 0.5);
+    const t = Math.min(1, Math.hypot(gx * 500, gy * 500) / (this.totalKm * 1000));
+    const alt = Math.max(0, base * (0.4 + 0.6 * t) + cfg.altBase * 0.5);
+    if (this.altCache.size < 400000) this.altCache.set(key, alt);
+    return alt;
+  }
+  // altitude du paysage: interpolation bilinéaire entre cellules de 500 m —
+  // collines et vallées continues (pentes 5-80‰), pas de marches d'escalier.
+  altAt(x: number, y: number): number {
+    const fx = x / 500, fy = y / 500;
+    const x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const tx = fx - x0, ty = fy - y0;
+    const a = this.altCell(x0 * 500, y0 * 500);
+    const b = this.altCell((x0 + 1) * 500, y0 * 500);
+    const c = this.altCell(x0 * 500, (y0 + 1) * 500);
+    const d = this.altCell((x0 + 1) * 500, (y0 + 1) * 500);
+    return a + (b - a) * tx + (c - a) * ty + (a - b - c + d) * tx * ty;
   }
 
   // difficulté du sol (1 = difficile): marécages, dunes vives — à éviter
@@ -203,45 +238,36 @@ export class WorldGenerator {
     const totalM = this.totalKm * 1000;
     const end = { x: this.endX, y: this.endY };
 
-    // --- niveau 1: chaîne de waypoints ---
-    // INVARIANT: chaque waypoint se rapproche strictement de B (progress >= 60%
-    // du pas). Le relief départage les candidats qui progressent — il ne peut
-    // JAMAIS faire diverger l'itinéraire (anti-spirale structurel).
+    // --- niveau 1: chaîne de waypoints (8 km) avec errance latérale ---
+    // L'itinéraire visite des points d'intérêt écartés de l'axe direct:
+    // l'errance latérale (marche aléatoire bornée, calibrée par biome) fait
+    // CHANGER le cap d'un waypoint à l'autre. INVARIANT: progression vers B.
     const wpts: { x: number; y: number }[] = [{ x: 0, y: 0 }];
     let cx = 0, cy = 0;
+    let lateral = 0;
     let guard = 0;
-    while (Math.hypot(end.x - cx, end.y - cy) > 3000 && guard++ < 4000) {
+    const WPT_SPACING = 8000;
+    while (Math.hypot(end.x - cx, end.y - cy) > 2000 && guard++ < 4000) {
       const distNow = Math.hypot(end.x - cx, end.y - cy);
-      const stepW = Math.min(8000, distNow * 0.5);
+      const stepW = Math.min(WPT_SPACING, Math.max(2000, distNow * 0.5));
       const toEnd = Math.atan2(end.y - cy, end.x - cx);
-      let best = null as null | { x: number; y: number; score: number };
-      for (let k = -3; k <= 3; k++) {
-        const cand = toEnd + k * 0.3;
-        const nx = cx + Math.cos(cand) * stepW;
-        const ny = cy + Math.sin(cand) * stepW;
-        // invariant: se rapprocher de B
-        const distThere = Math.hypot(end.x - nx, end.y - ny);
-        if (distThere > distNow - stepW * 0.55) continue;
-        // coût: relief (pente/difficulté) le long du saut, échantillonné
-        let costAcc = 0, n = 0;
-        for (let t = 0.2; t <= 0.9; t += 0.2) {
-          const sx = cx + (nx - cx) * t, sy = cy + (ny - cy) * t;
-          const kmHere = (Math.hypot(sx, sy) / totalM) * this.totalKm;
-          const cfg = BIOME_RELIEF[this.biomeAt(kmHere)];
-          const ahead = this.altAt(cx + (nx - cx) * Math.min(1, t + 0.15), cy + (ny - cy) * Math.min(1, t + 0.15));
-          const slope = Math.abs(ahead - this.altAt(sx, sy)) / (stepW * 0.15);
-          costAcc += slope > cfg.maxSlope ? (slope - cfg.maxSlope) * 2 + 0.5 : slope * 0.2;
-          costAcc += Math.max(0, this.wetnessAt(sx, sy) - 0.55) * cfg.costWet * 2;
-          n++;
-        }
-        const detour = Math.abs(k) * 0.1;
-        const score = costAcc / n + detour;
-        if (!best || score < best.score) best = { x: nx, y: ny, score };
+      const kmHere = this.km0(cx, cy, totalM, this.totalKm);
+      const latFactor = this.biomeLateralFactor(kmHere);
+      lateral = Math.max(-1.6, Math.min(1.6, lateral + this.rng.range(-0.55, 0.55) * latFactor));
+      const perpX = -Math.sin(toEnd), perpY = Math.cos(toEnd);
+      let best: { x: number; y: number; c: number } | null = null;
+      for (let k = -2; k <= 2; k++) {
+        const off = (lateral + k * 0.4) * stepW * 0.45;
+        const nx = cx + Math.cos(toEnd) * stepW + perpX * off;
+        const ny = cy + Math.sin(toEnd) * stepW + perpY * off;
+        if (Math.hypot(end.x - nx, end.y - ny) > distNow - stepW * 0.45) continue;
+        const cfg = BIOME_RELIEF[this.biomeAt(kmHere)];
+        const wet = this.wetnessAt(nx, ny);
+        const detail = this.detailNoise.fbm(nx, ny, 350, 2);
+        const c = Math.max(0, wet - 0.5) * cfg.costWet + Math.pow(Math.abs(detail - 0.5) * 2, 1.5) * 2.0 + Math.abs(k) * 0.05;
+        if (!best || c < best.c) best = { x: nx, y: ny, c };
       }
-      if (!best) {
-        // aucun candidat ne progresse (relief piégeux): forcer le cap direct
-        best = { x: cx + Math.cos(toEnd) * stepW, y: cy + Math.sin(toEnd) * stepW, score: 0 };
-      }
+      if (!best) best = { x: cx + Math.cos(toEnd) * stepW, y: cy + Math.sin(toEnd) * stepW, c: 0 };
       cx = best.x; cy = best.y;
       wpts.push({ x: cx, y: cy });
     }
@@ -256,17 +282,23 @@ export class WorldGenerator {
     let km = 0;
     let wpIdx = 1;
 
-    while (Math.hypot(end.x - x, end.y - y) > 2500 && this.points.length < (totalM / STEP_M) * 1.15) {
+    while (Math.hypot(end.x - x, end.y - y) > 2500 && this.points.length < (totalM / STEP_M) * 2.2) {
       const step = STEP_M;
       const biome = this.biomeAt(km);
       const cfg = BIOME_RELIEF[biome];
       const altHere = this.altAt(x, y);
 
       // waypoint actif
-      while (wpIdx < wpts.length - 1 && Math.hypot(wpts[wpIdx].x - x, wpts[wpIdx].y - y) < 2500) wpIdx++;
+      while (wpIdx < wpts.length - 1 && Math.hypot(wpts[wpIdx].x - x, wpts[wpIdx].y - y) < 2000) wpIdx++;
       const wp = wpts[Math.min(wpIdx, wpts.length - 1)];
-      const distWp = Math.hypot(wp.x - x, wp.y - y);
       const toWp = Math.atan2(wp.y - y, wp.x - x);
+      // SERPENTEMENT du conducteur: bruit de cap à l'échelle du virage (250 m
+      // de longueur d'onde), calibré par biome. Ce n'est pas un tirage de
+      // virage: c'est le comportement d'une piste qui ondule autour de son
+      // objectif — borné par l'attraction (jamais de divergence).
+      const wind = (this.detailNoise.fbm(km * 1000, km * 260, 240, 2) - 0.5) * 2
+        * (biome === "montagne" ? 0.85 : biome === "steppe" ? 0.22 : biome === "humide" ? 0.55 : 0.4);
+      const desiredBase = toWp + wind;
 
       // 7 options autour du cap courant; seules celles qui PROGRESSENT comptent
       let bestCost = Infinity;
@@ -276,23 +308,32 @@ export class WorldGenerator {
         const cand = heading + i * (Math.PI / 9);
         const px = x + Math.cos(cand) * step;
         const py = y + Math.sin(cand) * step;
-        const distThere = Math.hypot(wp.x - px, wp.y - py);
-        if (distThere >= distWp - step * 0.3) continue; // doit se rapprocher du wpt
         anyValid = true;
         // coût relief
         const altThere = this.altAt(px, py);
         const slope = Math.abs(altThere - altHere) / step;
-        const costSlope = slope > cfg.maxSlope ? 40 + (slope - cfg.maxSlope) * 120 : slope * 2.5;
+        const costSlope = slope > cfg.maxSlope ? 30 + (slope - cfg.maxSlope) * 90 : slope * 6.0;
         const wet = this.wetnessAt(px, py);
-        const costWet = Math.max(0, wet - 0.55) * cfg.costWet * 4;
+        const costWet = Math.max(0, wet - 0.5) * cfg.costWet * 8;
         let dHead = cand - heading;
         while (dHead > Math.PI) dHead -= 2 * Math.PI;
         while (dHead < -Math.PI) dHead += 2 * Math.PI;
-        const costInertia = Math.abs(dHead) * 2.2;
-        const cost = costSlope + costWet + costInertia;
+        const costInertia = Math.abs(dHead) * 0.8;
+        // attraction vers le cap sinueux — douce près du cap, DURE au-delà
+        // de ~0.4 rad (le serpentement ne fait jamais quitter l'itinéraire)
+        let derr = cand - desiredBase;
+        while (derr > Math.PI) derr -= 2 * Math.PI;
+        while (derr < -Math.PI) derr += 2 * Math.PI;
+        let derrWp = cand - toWp;
+        while (derrWp > Math.PI) derrWp -= 2 * Math.PI;
+        while (derrWp < -Math.PI) derrWp += 2 * Math.PI;
+        const costTarget =
+          Math.pow(Math.abs(derr) / 0.6, 2) * 0.5 +
+          Math.pow(Math.max(0, Math.abs(derrWp) - 0.45) / 0.4, 3) * 60;
+        const cost = costSlope + costWet + costInertia + costTarget;
         if (cost < bestCost) { bestCost = cost; bestHeading = cand; }
       }
-      if (!anyValid) bestHeading = toWp; // coin piégeux: forcer le cap direct
+      if (!anyValid) bestHeading = toWp;
 
       // rotation limitée
       let turn = bestHeading - heading;
@@ -425,17 +466,20 @@ export function generateWorld(params: WorldGenParams): World {
   return gen.toWorld(params.seed);
 }
 
-export function curvatureAt(world: World, km: number, window = 1): number {
+export function curvatureAt(world: World, km: number, window = 0.12): number {
+  // MOYENNE de courbure sur ±120 m (la portion que la voiture traverse
+  // réellement) — pas le max à 1 km à la ronde.
   const pts = world.points;
   if (!pts || pts.length === 0) return 0;
   const i0 = Math.max(0, Math.min(pts.length - 1, Math.floor(((km - window) * 1000) / STEP_M)));
   const i1 = Math.max(0, Math.min(pts.length - 1, Math.floor(((km + window) * 1000) / STEP_M)));
-  let maxAbs = 0;
+  let sum = 0, n = 0;
   for (let i = i0; i <= i1 && i < pts.length; i++) {
-    const c = Math.abs(pts[i].curvature);
-    if (c > maxAbs) maxAbs = c;
+    sum += Math.abs(pts[i].curvature);
+    n++;
   }
-  return Math.min(1, maxAbs / (1 / 60));
+  if (n === 0) return 0;
+  return Math.min(1, (sum / n) / (1 / 90));
 }
 
 export function segmentAt(segments: TerrainSegment[], km: number): TerrainSegment {

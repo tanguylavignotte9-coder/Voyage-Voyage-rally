@@ -24,12 +24,11 @@ export function darknessFactor(hourOfDay: number): number {
 
 export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string, darkness: number, world?: World): number {
   const eff = settingsEffects(car.settings);
-  let v = BASE_SPEED_KMH * (PACE_SPEED_FACTOR[car.pace] ?? 0.85) * eff.power;
-  const terrainV = TERRAIN_SPEED_KMH[seg.terrain] ?? 70;
-  // la vitesse effective tend vers la limite du terrain, pas seulement multiplicative
-  v = Math.min(v, terrainV * (1 + ((PACE_SPEED_FACTOR[car.pace] ?? 0.85) - 1) * 0.35) * RISK_SPEED_BONUS[car.risk]);
-  if (seg.terrain === "dunes" || seg.terrain === "regs") v *= eff.speedSand;
-  else v *= eff.speedHard;
+  // Vitesse = base × allure × risque × modulation terrain (multiplicative,
+  // jamais un plafond brutal: une bonne voiture menée en attaque va plus vite
+  // qu'en prudente même en bourbier — la modulation garde le terrain pénalisant).
+  let v = BASE_SPEED_KMH * (PACE_SPEED_FACTOR[car.pace] ?? 0.85) * RISK_SPEED_BONUS[car.risk] * eff.power;
+  v *= (TERRAIN_SPEED_KMH[seg.terrain] ?? 70) / 95; // piste moyenne = neutre
   if (seg.terrain === "pierrier" || seg.terrain === "col") v *= eff.speedRocks;
   if (seg.slope > 0) v *= Math.max(0.5, 1 - seg.slope * 0.015);
   else if (seg.slope < -1) v *= 1.03;
