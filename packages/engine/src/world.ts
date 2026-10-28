@@ -83,13 +83,17 @@ interface BiomeStyle {
   slowChance: number;
   // vitesse caractéristique du biome
   characterKmh: number;
+  // sinuosité: amplitude du serpentement (radians) et longueur d'onde (m)
+  // C'est ELLE qui fait les virages — une piste de raid ne va jamais droit.
+  windAmpRad: number;
+  windWavelengthM: number;
 }
 
 const BIOME_STYLES: Record<Biome, BiomeStyle> = {
-  montagne: { minTurnRadius: 30, waypointJitter: 2500, terrainChangeKm: 3, slowChance: 0.55, characterKmh: 45 },
-  desert: { minTurnRadius: 90, waypointJitter: 6000, terrainChangeKm: 6, slowChance: 0.4, characterKmh: 75 },
-  steppe: { minTurnRadius: 220, waypointJitter: 12000, terrainChangeKm: 10, slowChance: 0.25, characterKmh: 100 },
-  humide: { minTurnRadius: 60, waypointJitter: 3500, terrainChangeKm: 4, slowChance: 0.6, characterKmh: 50 },
+  montagne: { minTurnRadius: 35, waypointJitter: 2500, terrainChangeKm: 3, slowChance: 0.55, characterKmh: 45, windAmpRad: 0.9, windWavelengthM: 500 },
+  desert: { minTurnRadius: 80, waypointJitter: 6000, terrainChangeKm: 6, slowChance: 0.4, characterKmh: 75, windAmpRad: 0.7, windWavelengthM: 900 },
+  steppe: { minTurnRadius: 180, waypointJitter: 12000, terrainChangeKm: 10, slowChance: 0.25, characterKmh: 100, windAmpRad: 0.35, windWavelengthM: 2200 },
+  humide: { minTurnRadius: 50, waypointJitter: 3500, terrainChangeKm: 4, slowChance: 0.6, characterKmh: 50, windAmpRad: 0.8, windWavelengthM: 700 },
 };
 
 const TERRAIN_BY_BIOME: Record<Biome, [TerrainType, number][]> = {
@@ -230,13 +234,14 @@ export class WorldGenerator {
       const target = waypoints[Math.min(wpIdx, waypoints.length - 1)];
       const toTarget = Math.atan2(target.y - y, target.x - x);
 
-      // l'altitude locale influence la trajectoire: on évite les murs de montagne
-      // (le bruit donne une « difficulté » que le conducteur contourne)
-      const diff = this.noise.fbm(x, y, 5000, 3);
-      const diffAngle = (diff - 0.5) * 1.2; // déviation douce
+      // Sinuosité: serpentement du tracé en fonction de l'arc — les VIRAGES.
+      // Amplitude et longueur d'onde par biome: épingles de montagne, grandes
+      // courbes de steppe. Le conducteur suit ce cap sinueux dans la limite
+      // de sa capacité de virage.
+      const wind = (this.noise.fbm(d, d * 0.5, style.windWavelengthM, 2) - 0.5) * 2 * style.windAmpRad;
 
-      // cap désiré: waypoint + contour des difficultés
-      let desired = toTarget + diffAngle * (biome === "montagne" ? 0.8 : biome === "steppe" ? 0.15 : 0.4);
+      // cap désiré: direction générale (waypoint) + sinuosité locale
+      let desired = toTarget + wind;
       // normalisation de l'écart de cap
       let err = desired - heading;
       while (err > Math.PI) err -= 2 * Math.PI;
@@ -251,7 +256,7 @@ export class WorldGenerator {
       heading += turn;
 
       // lissage de la courbure (suspension du modèle)
-      curvatureSmooth = curvatureSmooth * 0.7 + curvature * 0.3;
+      curvatureSmooth = curvatureSmooth * 0.45 + curvature * 0.55;
 
       x += Math.cos(heading) * STEP_M;
       y += Math.sin(heading) * STEP_M;
