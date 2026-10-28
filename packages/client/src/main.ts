@@ -1039,13 +1039,17 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
   while (dAng < -Math.PI) dAng += 2 * Math.PI;
   camAngle += dAng * 0.25;
 
-  // transformation monde -> écran
+  // transformation monde -> écran: le CAP de la voiture pointe vers le HAUT.
+  // On applique la rotation inverse du cap PUIS un quart de tour (-90°):
+  // un point devant la voiture obtient ry négatif (vers le haut de l'écran).
+  const viewAngle = camAngle + Math.PI / 2; // repère "cap = -y écran"
+  const cosV = Math.cos(-viewAngle), sinV = Math.sin(-viewAngle);
   const W2S = (x: number, y: number): [number, number] => {
     const dx = x - camX, dy = y - camY;
-    const rx = dx * Math.cos(-camAngle) - dy * Math.sin(-camAngle);
-    const ry = dx * Math.sin(-camAngle) + dy * Math.cos(-camAngle);
-    // voiture à 30% du BAS (= 70% depuis le haut): on la voit de dos au bas
-    // de l'écran, la route s'étire loin devant vers le haut
+    const rx = dx * cosV - dy * sinV;
+    const ry = dx * sinV + dy * cosV;
+    // voiture à 30% du BAS: on la voit de dos au bas de l'écran,
+    // la route s'étire loin devant vers le HAUT
     return [w / 2 + rx * PXM, h * 0.70 + ry * PXM];
   };
 
@@ -1207,13 +1211,13 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
       if (Math.abs(c.positionKm - km) > half) continue;
       const p = pathPoint(c.positionKm);
       if (!p) continue;
-      drawCar2D(p.x, p.y, c.color, c.speedKmh > 2, W2S, PXM, now, c.positionKm, state!.players.find((pl) => pl.id === c.playerId)?.pseudo);
+      drawCar2D(p.x, p.y, c.color, c.speedKmh > 2, W2S, PXM, now, c.positionKm, viewAngle, state!.players.find((pl) => pl.id === c.playerId)?.pseudo);
     }
   }
 
   // ---------- MA VOITURE: position réelle, cap réel, bouge à l'écran ----------
   if (myPub) {
-    drawCar2D(me.x, me.y, myPub.color, myPub.speedKmh > 2, W2S, PXM, now, km);
+    drawCar2D(me.x, me.y, myPub.color, myPub.speedKmh > 2, W2S, PXM, now, km, viewAngle);
     // états
     const [msx, msy] = W2S(me.x, me.y);
     if (myPub.immobilized) {
@@ -1254,7 +1258,7 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     ctx.save();
     const [chx, chy] = W2S(me.x, me.y);
     ctx.translate(chx, chy);
-    ctx.rotate(carAngle - camAngle);
+    ctx.rotate(carAngle - viewAngle);
     const grad = ctx.createLinearGradient(2 * PXM, 0, 55 * PXM, 0);
     grad.addColorStop(0, `rgba(255,240,170,${0.30 + 0.2 * dark})`);
     grad.addColorStop(1, "rgba(255,240,170,0)");
@@ -1324,7 +1328,7 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
 function drawCar2D(
   wx: number, wy: number, color: string, moving: boolean,
   W2S: (x: number, y: number) => [number, number],
-  PXM: number, now: number, kmOfCar: number, label?: string
+  PXM: number, now: number, kmOfCar: number, viewAngle: number, label?: string
 ): void {
   const [sx, sy] = W2S(wx, wy);
   const L = 2.3, W = 1.05;
@@ -1335,7 +1339,7 @@ function drawCar2D(
   const ang = pA && pB ? Math.atan2(pB.y - pA.y, pB.x - pA.x) : 0;
   ctx.save();
   ctx.translate(sx, sy);
-  ctx.rotate(ang - camAngle);
+  ctx.rotate(ang - viewAngle);
   // ombre portée (décalée: le soleil vient du haut-gauche)
   ctx.fillStyle = "rgba(20,14,8,0.35)";
   ctx.beginPath();
