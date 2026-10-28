@@ -119,6 +119,17 @@ export function generateWorld(params: WorldGenParams): World {
   stations.push({ km: totalKm, name: "Arrivée", hasHotel: true });
 
   const villages: { km: number; name: string; traversed: boolean }[] = [];
+  // Tracé géométrique: dévers latéral (m) à chaque km entier — dérivé du même rng.
+  // Fait partie du monde: serveur ET clients partagent le même tracé.
+  const pathZ: number[] = [];
+  for (let k = 0; k <= totalKm; k++) {
+    pathZ.push(
+      60 * Math.sin(k * 1.7 + (params.seed % 977) / 977 * Math.PI * 2) +
+      35 * Math.sin(k * 0.9 + (params.seed % 613) / 613 * Math.PI * 2) +
+      18 * Math.sin(k * 3.8 + (params.seed % 331) / 331 * Math.PI * 2)
+    );
+  }
+
   const rivers: { km: number; name: string }[] = [];
   let villageKm = rng.range(40, 120);
   let vIdx = 1;
@@ -144,7 +155,20 @@ export function generateWorld(params: WorldGenParams): World {
     rivers,
     startName: "Départ",
     endName: "Arrivée",
+    pathZ,
   };
+}
+
+// Courbure normalisée 0..1 sur une fenêtre de +-window km autour de km.
+// 1 = virage très serré pour la typologie de terrain courante.
+export function curvatureAt(world: World, km: number, window = 1): number {
+  const z = world.pathZ;
+  if (!z || z.length === 0) return 0;
+  const k0 = Math.max(0, Math.min(z.length - 1, Math.round(km - window)));
+  const k1 = Math.max(0, Math.min(z.length - 1, Math.round(km + window)));
+  const dz = Math.abs(z[k1] - z[k0]);
+  // ~150 m de dévers sur 2 km = virage très marqué
+  return Math.min(1, dz / 150);
 }
 
 export function segmentAt(segments: TerrainSegment[], km: number): TerrainSegment {

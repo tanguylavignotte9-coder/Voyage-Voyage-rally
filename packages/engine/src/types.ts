@@ -251,4 +251,5 @@ export interface World {
   rivers: { km: number; name: string }[];
   startName: string;
   endName: string;
+  pathZ: number[];
 }

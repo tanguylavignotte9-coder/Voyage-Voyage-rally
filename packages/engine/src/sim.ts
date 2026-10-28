@@ -9,7 +9,7 @@ import {
   FUEL_PRICE_PER_LITRE, TIRE_PRICE, HOTEL_PRICE, REPAIR_PRICE_BASE, REPAIR_HOURS, ACCIDENT_FAULT_PENALTY,
   settingsEffects,
 } from "./calibration";
-import { segmentAt, nextStation, weatherAt } from "./world";
+import { segmentAt, nextStation, weatherAt, curvatureAt } from "./world";
 import { Rng } from "./rng";
 import { GameVariables, tickPlanner, ActiveEffects } from "./planner";
 
@@ -22,7 +22,7 @@ export function darknessFactor(hourOfDay: number): number {
   return 0;
 }
 
-export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string, darkness: number): number {
+export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string, darkness: number, world?: World): number {
   const eff = settingsEffects(car.settings);
   let v = BASE_SPEED_KMH * (PACE_SPEED_FACTOR[car.pace] ?? 0.85) * eff.power;
   const terrainV = TERRAIN_SPEED_KMH[seg.terrain] ?? 70;
@@ -33,6 +33,10 @@ export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string
   if (seg.terrain === "pierrier" || seg.terrain === "col") v *= eff.speedRocks;
   if (seg.slope > 0) v *= Math.max(0.5, 1 - seg.slope * 0.015);
   else if (seg.slope < -1) v *= 1.03;
+  // les virages se négocient: courbure forte = ralentissement (plus dur en attaque/risque haut)
+  const curve = world ? curvatureAt(world, car.positionKm) : 0;
+  const curvePenalty = 1 - curve * 0.22 * (car.risk === "haut" ? 1.2 : car.risk === "bas" ? 0.8 : 1);
+  v *= curvePenalty;
   if (weather === "tempete_sable" || weather === "pluie_diluvienne") v *= 0.35;
   if (weather === "piste_endommagee") v *= 0.5;
   else if (weather === "brouillard" || weather === "grele" || weather === "vent_fort") v *= 0.55;
@@ -195,7 +199,7 @@ function tickCarInternal(car: CarState, ctx: SimContext, emit: (t: string) => vo
 
   const riskFactor = RISK_WEAR_FACTOR[car.risk];
 
-  let speed = computeSpeed(car, seg, weather, darkness);
+  let speed = computeSpeed(car, seg, weather, darkness, ctx.world);
   speed = applyTrafficEffects(car, ctx, speed, riskFactor, emit);
 
   // Arrêt planifié: si des prestations sont demandées mais qu'on n'est pas encore à la station,

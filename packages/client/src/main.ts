@@ -847,17 +847,15 @@ cv.addEventListener("wheel", (e) => {
 
 
 // ===== Vue 2D de haut — route ancrée au monde, caméra suit la voiture =====
-// Géométrie de l'itinéraire : dévers latéral (mètres) en fonction du km, déterministe.
-// C'est cette fonction qui donne les virages — la route change réellement avec la position.
+// Géométrie réelle de l'itinéraire: le tracé pathZ est généré par le moteur de monde
+// et partagé serveur/clients — la vue dessine LE monde, pas une imposture.
 function roadZ(k: number, seed: number): number {
-  const p1 = ((seed % 977) / 977) * Math.PI * 2;
-  const p2 = ((seed % 613) / 613) * Math.PI * 2;
-  const p3 = ((seed % 331) / 331) * Math.PI * 2;
-  return (
-    60 * Math.sin(k * 1.7 + p1) +
-    35 * Math.sin(k * 0.9 + p2) +
-    18 * Math.sin(k * 3.8 + p3)
-  );
+  const z = state?.world?.pathZ;
+  if (!z || z.length === 0) return 0;
+  const i0 = Math.max(0, Math.min(z.length - 1, Math.floor(k)));
+  const i1 = Math.max(0, Math.min(z.length - 1, i0 + 1));
+  const f = k - i0;
+  return z[i0] * (1 - f) + z[i1] * f; // interpolation linéaire entre km entiers
 }
 
 function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPublic | undefined, now: number, dt: number): void {
