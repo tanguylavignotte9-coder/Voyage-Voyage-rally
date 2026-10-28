@@ -985,11 +985,13 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
   ctx.fillRect(0, 0, w, h);
 
   // ---------- ROUTE: le vrai tracé, large bande, tous les points visibles ----------
-  const half = 0.16; // ±160 m: assez loin devant, détaillé et rapide à l écran
+  // ±1 km: la route et son environnement sont dessinés loin autour de la
+  // voiture (le préchargement de chunks ±8 km couvre largement).
+  const half = 1.0;
   const roadWm = seg?.width === "etroite" ? 3.5 : seg?.width === "moyenne" ? 5 : 6.5;
   // collecter les points du tracé dans la fenêtre
   const path: { x: number; y: number }[] = [];
-  for (let k = km - half; k <= km + half; k += 0.001) {
+  for (let k = km - half; k <= km + half; k += 0.0004) {
     const p = pathPoint(k);
     if (p) path.push(p);
   }
@@ -1015,9 +1017,10 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
       ctx.strokeStyle = "rgba(40,32,22,0.35)";
       ctx.lineWidth = 0.55 * PXM;
       ctx.beginPath();
-      // traces en offset latéral le long du tracé
+      // traces en offset latéral — seulement à portée de lecture (±120 m)
+      const halfTrack = Math.min(half, 0.12);
       let first = true;
-      for (let k2 = km - half; k2 <= km + half; k2 += 0.002) {
+      for (let k2 = km - halfTrack; k2 <= km + halfTrack; k2 += 0.002) {
         const pp = pathPoint(k2);
         const pa = pathPoint(k2 - 0.002), pb = pathPoint(k2 + 0.002);
         if (!pp || !pa || !pb) continue;
@@ -1058,7 +1061,7 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
   };
   // DEUX RANGÉES de décors ancrés au monde: bande rapprochée (10-40 m) et
   // horizon proche (40-110 m) — l'environnement existe au-delà du ruban.
-  const decorStep = 10; // tous les 10 m le long du tracé
+  const decorStep = 15; // le long du tracé
   const dStart = Math.floor((km - half) * 1000 / decorStep) * decorStep;
   for (let dm = dStart; dm <= (km + half) * 1000; dm += decorStep) {
     const k = dm / 1000;
@@ -1104,8 +1107,9 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     }
   }
 
-  // ---------- PIQUETS de vitesse: tous les 20 m, ils défilent vite ----------
-  for (let dm = Math.floor((km - half) * 50) * 20; dm <= (km + half) * 1000; dm += 20) {
+  // ---------- PIQUETS de vitesse: tous les 20 m, à portée visible ----------
+  const halfPiquets = Math.min(half, 0.2);
+  for (let dm = Math.floor((km - halfPiquets) * 50) * 20; dm <= (km + halfPiquets) * 1000; dm += 20) {
     const k = dm / 1000;
     const p = pathPoint(k);
     if (!p) continue;
