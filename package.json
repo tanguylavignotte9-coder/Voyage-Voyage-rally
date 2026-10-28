@@ -6,7 +6,7 @@
   "scripts": {
     "build": "npm run build -w packages/engine && npm run build -w packages/server && npm run build:client",
     "build:client": "esbuild packages/client/src/main.ts --bundle --outfile=packages/server/public/app.js --format=iife --target=es2020",
-    "test": "npm run build && node --test packages/engine/dist/",
+    "test": "npm run build && node --test packages/engine/dist/engine.test.js",
     "start": "npm run build && node packages/server/dist/index.js"
   },
   "devDependencies": {
