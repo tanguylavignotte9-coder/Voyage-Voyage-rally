@@ -14,7 +14,6 @@
     "start": "npm run build && node packages/server/dist/index.js"
   },
   "devDependencies": {
-    "esbuild": "^0.24.0",
     "typescript": "^5.6.0",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0"
