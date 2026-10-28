@@ -890,6 +890,7 @@ function altAt(km: number): number {
 
 // ===== Rendu caméra =====
 let camZoom = 0.55; // dézoom par défaut: ~73 m visibles
+let racingOffset = 0; // décalage latéral courant de la racing line
 let lastStateTime = 0;
 let extrapolatedKm = 0;
 let lastKnownKm = 0;
@@ -917,7 +918,14 @@ cv.addEventListener("wheel", (e) => {
 // ===== Vue 2D de haut — route ancrée au monde, caméra suit la voiture =====
 // Tracé réel: les chunks de polyligne 2D du monde, demandés au serveur.
 // pathPoint(k) interpole dans les chunks — la vue dessine le VRAI monde.
-function pathPoint(k: number): { x: number; y: number } | null {
+// Interpolation Catmull-Rom entre 4 points de tracé: la route est une COURBE
+// lisse (les virages sont ronds, plus de facettes visibles entre segments).
+function catmull(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const t2 = t * t, t3 = t2 * t;
+  return 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+}
+
+function rawPoint(k: number): { x: number; y: number } | null {
   const base = Math.floor(k / 4) * 4; // chunks de 4 km
   const chunk = pathChunks.get(base);
   if (!chunk || chunk.length === 0) return null;
@@ -928,6 +936,23 @@ function pathPoint(k: number): { x: number; y: number } | null {
   return {
     x: chunk[i0].x + (chunk[i1].x - chunk[i0].x) * f,
     y: chunk[i0].y + (chunk[i1].y - chunk[i0].y) * f,
+  };
+}
+
+function pathPoint(k: number): { x: number; y: number } | null {
+  // points de contrôle autour de k (i-1, i, i+1, i+2) — dans le chunk
+  const base = Math.floor(k / 4) * 4;
+  const chunk = pathChunks.get(base);
+  if (!chunk || chunk.length === 0) return null;
+  const fi = ((k - base) * 1000) / 20;
+  const i1 = Math.max(0, Math.min(chunk.length - 1, Math.floor(fi)));
+  const i0 = Math.max(0, i1 - 1);
+  const i2 = Math.min(chunk.length - 1, i1 + 1);
+  const i3 = Math.min(chunk.length - 1, i1 + 2);
+  const t = fi - Math.floor(fi);
+  return {
+    x: catmull(chunk[i0].x, chunk[i1].x, chunk[i2].x, chunk[i3].x, t),
+    y: catmull(chunk[i0].y, chunk[i1].y, chunk[i2].y, chunk[i3].y, t),
   };
 }
 
@@ -943,10 +968,10 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
   // à ~500 px/s (sensation de vitesse réelle) et la voiture fait ~140 px.
   const PXM = (w / 40) * camZoom; // pixels par mètre
 
-  // ma position réelle sur le tracé
-  const me = pathPoint(km);
+  // ma position sur l'axe du tracé + point devant (cap de la route)
+  const meRoad = pathPoint(km);
   const meAhead = pathPoint(km + 0.006);
-  if (!me || !meAhead) {
+  if (!meRoad || !meAhead) {
     ctx.fillStyle = "#2b2620";
     ctx.fillRect(0, 0, w, h);
     ctx.fillStyle = "#efe8dc";
@@ -954,16 +979,46 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     ctx.fillText("Chargement du tracé…", w / 2 - 70, h / 2);
     return;
   }
-  const carAngle = Math.atan2(meAhead.y - me.y, meAhead.x - me.x);
+  // RACING LINE crédible: la voiture ne reste pas rivée à l'axe de la route.
+  // À l'approche d'un virage elle prend l'EXTÉRIEUR, à l'apex l'INTÉRIEUR,
+  // en sortie elle s'ouvre à nouveau. Le décalage latéral dérive de la
+  // courbure mesurée devant/derrière (lissée en douceur).
+  const roadWm0 = seg?.width === "etroite" ? 3.5 : seg?.width === "moyenne" ? 5 : 6.5;
+  const lookAhead = pathPoint(km + 0.03);
+  const lookFar = pathPoint(km + 0.09);
+  const curvSign = (() => {
+    // courbure signée: croix (dérivée du cap) entre l'avant-proche et l'avant-loin
+    if (!lookAhead || !lookFar) return 0;
+    const cross = (meAhead.x - meRoad.x) * (lookFar.y - meRoad.y) - (meAhead.y - meRoad.y) * (lookFar.x - meRoad.x);
+    return Math.sign(cross);
+  })();
+  const curvMag = (() => {
+    if (!lookAhead || !lookFar) return 0;
+    const cross = (meAhead.x - meRoad.x) * (lookFar.y - meRoad.y) - (meAhead.y - meRoad.y) * (lookFar.x - meRoad.x);
+    const d1 = Math.hypot(meAhead.x - meRoad.x, meAhead.y - meRoad.y);
+    const d2 = Math.hypot(lookFar.x - meRoad.x, lookFar.y - meRoad.y);
+    if (d1 < 0.01 || d2 < 0.01) return 0;
+    return Math.min(1, Math.abs(cross) / (d1 * d2) * 40); // ~normalisé
+  })();
+  // cible: extérieur à l'entrée (opposé au virage), intérieur à l'apex
+  // (signe du virage), extérieur en sortie — suivi doux.
+  const targetOffset = -curvSign * curvMag * roadWm0 * 0.55 + Math.sin(km * 137.3) * roadWm0 * 0.08;
+  racingOffset += (targetOffset - racingOffset) * 0.06;
+  // position effective: point du tracé + offset latéral (normale locale)
+  const angRoad = Math.atan2(meAhead.y - meRoad.y, meAhead.x - meRoad.x);
+  const me = {
+    x: meRoad.x - Math.sin(angRoad) * racingOffset,
+    y: meRoad.y + Math.cos(angRoad) * racingOffset,
+  };
+  const carAngle = Math.atan2(meAhead.y - meRoad.y, meAhead.x - meRoad.x);
 
-  // CAMÉRA ALIGNÉE: l'axe de la voiture = axe vertical de l'écran (on roule
-  // « vers le haut»). La caméra suit la POSITION avec un léger retard
-  // (élégance dans les virages), mais l'ANGLE suit le cap de la voiture
-  // franchement (15%/frame — elle pivote avec nous, la route tourne autour).
-  const targetX = me.x;
-  const targetY = me.y;
+  // CAMÉRA ARRIÈRE (poursuite): le point visé est EN RETRAIT derrière la
+  // voiture — on la voit de dos, elle grimpe vers le haut de l'écran quand
+  // elle accélère. L'angle suit le cap franchement.
+  const targetX = me.x - Math.cos(carAngle) * 8;
+  const targetY = me.y - Math.sin(carAngle) * 8;
   if (!camInit) { camX = targetX; camY = targetY; camAngle = carAngle; camInit = true; }
-  const follow = 0.12;
+  const follow = 0.10;
   camX += (targetX - camX) * follow;
   camY += (targetY - camY) * follow;
   let dAng = carAngle - camAngle;

@@ -300,6 +300,38 @@ export class WorldGenerator {
       steppe:   { straightMin: 200, straightMax: 1400, radiusMin: 80, radiusMax: 260, turnChance: 0.4, hairpinChance: 0.02 },
     } as const;
 
+    // ===== SÉCURITÉ ANTI-CROISEMENT =====
+    // Grille spatiale des points déjà tracés (cellules de 60 m). Avant
+    // d'accepter un pas, on vérifie qu'il ne s'approche pas d'un segment
+    // antérieur du tracé à moins de MIN_SEP m — sinon on dévie le cap.
+    // (les épingles serrées restent possibles: 60 m de gabarit)
+    const MIN_SEP = 30; // deux pistes parallèles ne se touchent jamais; les lacets légitimes passent
+    const CELL = 60;
+    const grid = new Map<string, { x: number; y: number; km: number }[]>();
+    const cellKey = (gx: number, gy: number) => gx + "," + gy;
+    const register = (pt: { x: number; y: number; km: number }) => {
+      const gx = Math.floor(pt.x / CELL), gy = Math.floor(pt.y / CELL);
+      const key = cellKey(gx, gy);
+      let arr = grid.get(key);
+      if (!arr) { arr = []; grid.set(key, arr); }
+      arr.push(pt);
+    };
+    // trop proche d'un segment ANTÉRIEUR (km éloigné du nôtre)?
+    const tooClose = (px: number, py: number, myKm: number): boolean => {
+      const gx = Math.floor(px / CELL), gy = Math.floor(py / CELL);
+      for (let cx = gx - 1; cx <= gx + 1; cx++) {
+        for (let cy = gy - 1; cy <= gy + 1; cy++) {
+          const arr = grid.get(cellKey(cx, cy));
+          if (!arr) continue;
+          for (const pt of arr) {
+            if (Math.abs(pt.km - myKm) < 0.35) continue; // nos voisins immédiats (une épingle fait ~0.3 km d'arc)
+            if (Math.hypot(pt.x - px, pt.y - py) < MIN_SEP) return true;
+          }
+        }
+      }
+      return false;
+    };
+
     type Phase = { kind: "straight" | "entry" | "turn" | "exit"; remaining: number; targetCurv: number; turnLen: number };
     let phase: Phase = { kind: "straight", remaining: this.rng.range(60, 200), targetCurv: 0, turnLen: 0 };
     let curv = 0;      // courbure courante (lissée par les clothoïdes)
@@ -380,9 +412,49 @@ export class WorldGenerator {
 
       heading += curv * step;
 
+      // INVARIANT DE PROGRESSION: le pas ne doit jamais S'ÉLOIGNER de B.
+      // (antidote structurel aux boucles: une piste de rally va toujours
+      // globalement de A vers B, ses virages ne la font jamais reculer)
+      {
+        const distNow = Math.hypot(end.x - x, end.y - y);
+        const candX = x + Math.cos(heading) * step;
+        const candY = y + Math.sin(heading) * step;
+        const distCand = Math.hypot(end.x - candX, end.y - candY);
+        if (distCand > distNow) {
+          // ce pas éloigne de B: chercher le cap le plus proche qui rapproche
+          let fixed = false;
+          for (const dv of [0.25, -0.25, 0.5, -0.5, 0.8, -0.8, 1.2, -1.2]) {
+            const cand = heading + dv;
+            const px2 = x + Math.cos(cand) * step;
+            const py2 = y + Math.sin(cand) * step;
+            if (Math.hypot(end.x - px2, end.y - py2) < distNow) { heading = cand; fixed = true; break; }
+          }
+        }
+      }
+      // SÉCURITÉ ANTI-CROISEMENT: le pas IMMÉDIAT ne doit s'approcher d'aucun
+      // segment antérieur à moins de MIN_SEP. Cap dégagé le plus proche sinon.
+      if (tooClose(x + Math.cos(heading) * step, y + Math.sin(heading) * step, km)) {
+        let deviated = false;
+        for (const dv of [0.3, -0.3, 0.6, -0.6, 0.95, -0.95, 1.35, -1.35, 1.8, -1.8, 2.4, -2.4]) {
+          const cand = heading + dv;
+          const nx = x + Math.cos(cand) * step;
+          const ny = y + Math.sin(cand) * step;
+          if (!tooClose(nx, ny, km) && !tooClose(nx + Math.cos(cand) * step * 2, ny + Math.sin(cand) * step * 2, km)) {
+            heading = cand;
+            deviated = true;
+            break;
+          }
+        }
+        if (!deviated) {
+          // totalement encerclé: la piste ne peut pas continuer ici — terminer
+          break;
+        }
+      }
+
       x += Math.cos(heading) * step;
       y += Math.sin(heading) * step;
       km += step / 1000;
+      register({ x, y, km });
 
       // altitude LE LONG DE LA ROUTE: la piste suit le terrain mais une
       // vraie piste ne dépasse pas ~150‰ (au-delà, elle traverse en lacet).
