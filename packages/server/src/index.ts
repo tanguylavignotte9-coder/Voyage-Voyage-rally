@@ -25,9 +25,18 @@ if (args[0] === "create") {
 }
 
 if (!config && !RaceHost.restore(SNAP_DIR)) {
-  console.log("Usage: node dist/index.js create [seed] [hours] [intervalSec] [programMin] [closureHours] [code]");
-  console.log("       ou place un snapshot dans data/snapshot.json");
-  process.exit(1);
+  // Lancement simple (double-clic) : crée une course par défaut — 7 jours, code d'accès "rally".
+  // Pour personnaliser : node dist/index.js create <graine> <durée_h> <intervalle_s> <fenêtre_min> <clôture_h> <code>
+  config = {
+    seedText: Math.random().toString(36).slice(2, 10),
+    targetHours: 168,
+    startIntervalSeconds: 60,
+    programWindowMinutes: 60,
+    closureDelayHours: 24,
+    accessCode: "rally",
+    adminPseudo: "admin",
+  };
+  console.log("Aucune course existante — course par défaut créée (7 jours, code d'accès : rally)");
 }
 
 let host = RaceHost.restore(SNAP_DIR) || new RaceHost(config!, SNAP_DIR);
