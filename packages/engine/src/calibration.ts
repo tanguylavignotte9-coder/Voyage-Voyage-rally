@@ -256,3 +256,110 @@ export const DAILY_PRIME_BASE = 900;
 export const DAILY_PRIME_RANK_BONUS = 300;
 export const CHALLENGE_PRIME = 400;
 export const ACCIDENT_FAULT_PENALTY = 900;
+
+// ========== EFFETS MÉTÉO SUR LA CONDUITE (multiplicateurs adhérence/puissance) ==========
+export const WEATHER_GRIP_EFFECT: Record<string, number> = {
+  tempete_sable: 0.55, pluie_diluvienne: 0.55, piste_endommagee: 0.8,
+  brouillard: 1.0, grele: 1.0, vent_fort: 1.0, canicule: 1.0, froid_intense: 1.0, clair: 1.0,
+};
+export const WEATHER_POWER_EFFECT: Record<string, number> = {
+  tempete_sable: 0.7, pluie_diluvienne: 0.7, piste_endommagee: 0.75,
+  brouillard: 0.8, grele: 0.8, vent_fort: 0.8, canicule: 0.92, froid_intense: 0.92, clair: 1.0,
+};
+
+// ========== CONDUITE (comportement du pilote) ==========
+export const DARING_BY_RISK = { haut: 1.0, bas: 0.72, normal: 0.88 };
+export const NIGHT_POWER_LOSS = 0.25;        // on lève le pied la nuit (ligne droite)
+export const NIGHT_AUDACITY_LOSS = 0.35;    // on réduit l'audace en virage la nuit
+export const FATIGUE_POWER_START = 70;      // la fatigue commence à peser sur la puissance
+export const FATIGUE_POWER_RATE = 0.3;      // intensité de la perte (par point au-dessus du seuil)
+export const FATIGUE_AUDACITY_RATE = 0.4;   // idem sur l'audace en virage
+export const CURVE_REF_RADIUS_M = 90;      // rayon de référence de la courbure normalisée
+export const CURVE_MIN_NORMALIZED = 0.001;  // en dessous: considéré droit
+export const TOWING_SPEED_FACTOR = 0.65;   // on tire une autre auto
+export const FUEL_DENSITY_KG_PER_L = 0.8;  // masse de l'essence
+export const WHEEL_DRIVE_EFF = 0.9;        // 4 roues motrices: efficacité de la motricité
+export const GRAVITY = 9.81;
+
+// ========== INTERACTIONS TRAFIC ==========
+export const DRAFT_GAP_MIN_KM = 0.02, DRAFT_GAP_MAX_KM = 0.3;   // aspiration
+export const DRAFT_SPEED_DIFF = 8;                                // km/h de tolérance
+export const OVERTAKE_GAP_MAX_KM = 0.15;                          // fenêtre de dépassement
+export const OVERTAKE_RISK_BASE = { agressif: 0.15, prudent: 0.05, interdit: 0 };
+export const DEFEND_EXTRA_RISK = 0.3;
+export const OVERTAKE_COLLISION_SHARE = 0.4;   // part de risque de l'accrochage
+export const OVERTAKE_SPEED_GAIN = 1.05;       // gain de vitesse au dépassement
+export const OVERTAKE_RISK_FACTOR = { haut: 2, normal: 1, bas: 0.3 };
+export const DUST_GAP_KM = 0.05;               // dans la poussière: malus
+export const DUST_SPEED_FACTOR = 0.9;
+export const DUST_FATIGUE_PER_TICK = 0.01;
+
+// ========== STATION / RÉPARATION ==========
+export const FUEL_TIME_PER_PERCENT = 0.25 / 100;  // heures de plein par % de réservoir
+export const WHEEL_CHANGE_HOURS = 0.5;
+export const REPAIR_TIME_MIN_SHARE = 0.4;          // courbe de temps: part fixe
+export const REPAIR_TIME_WEAR_SHARE = 0.6;         // + part proportionnelle à l'usure
+export const REPAIR_PRICE_MIN_SHARE = 0.6;        // idem pour le prix
+export const REPAIR_PRICE_WEAR_SHARE = 0.6;
+export const ORGAN_CRITICAL_WEAR = 80;             // seuil indicateur (lecture, canal par défaut N°3)
+export const ORGAN_WARN_WEAR = 60;                // seuil symptôme vague
+export const DIAG_ORGAN_MENTION = 60;            // l'atelier mentionne au-delà de
+
+// ========== SIGNEAUX DE JEU ==========
+export const MENTAL_LOG_MAX = 200;
+export const STATION_PROXIMITY_KM = 0.3;          // fenêtre de détection d'une station
+export const FATIGUE_HEAVY_EYES = 70;             // pensées: paupières lourdes
+export const FATIGUE_DANGER = 85;                 // pensées: danger
+
+// ========== CHARGES D'ORGANES (répartition des forces, en parts) ==========
+export const AERO_HALF = 0.5;                    // ½·ρ·Cx·S (le 0.5 de la formule de traînée)
+export const CONVERGENCE_DAMPING = 0.5;         // amorti de l'itération d'équilibre vitesse
+export const CONVERGENCE_EPS = 0.05;            // seuil de convergence (m/s)
+export const FUEL_TIME_H_PER_L = 0.0042;        // heures de plein par litre (≈15 min les 400 L)
+
+// répartition des charges par organe (parts de statWheel/shock/traction)
+export const LOAD_SHOCK_GAIN = 0.00025;        // chocs: mass·v²·Cr·gain
+export const LOAD_BUMP_CR_GAIN = 9;            // facteur de bosse: Cr × gain
+export const LOAD_BUMP_V_REF = 33;             // vitesse de référence de bosse (m/s)
+export const LOAD_SUSP_OVER_STATIC = 1.15;      // suspensions au-delà de la jambe statique
+export const LOAD_TIRE_SHOCK_AV = 0.55, LOAD_TIRE_SHOCK_AR = 0.45; // répartition chocs pneus
+export const LOAD_TIRE_TRACTION_SHARE = 0.12; // part traction sur pneu arrière
+export const LOAD_CHASSIS_STATIC_SHARE = 0.35, LOAD_CHASSIS_SHOCK_SHARE = 0.6;
+export const LOAD_ENGINE_NIGHT_EXTRA = 0.1;    // moteur: la nuit, on force (chaleur)
+export const LOAD_COOLANT_TRACTION_SHARE = 0.55, LOAD_COOLANT_STRESS_N = 9000;
+export const LOAD_COOLANT_UPHILL = 1.3, LOAD_UPHILL_REF_PERMILLE = 40;
+export const LOAD_BRAKES_DOWNHILL_N = 1.1, LOAD_BRAKES_STATIC_SHARE = 0.04;
+export const LOAD_TRANSMISSION_OVER = 1.05;    // boîte au-delà de la traction moteur
+
+// accident: vigueur et excès
+export const VIGOR_LOSS_PER_FATIGUE = 0.0035;    // perte de vigueur par point de fatigue (0.35/100)
+export const ACCIDENT_EXCESS_GAIN = 0.02;       // probabilité d'accident par excès²
+export const ACCIDENT_GRAVITY_DIV = 2, ACCIDENT_GRAVITY_RAND = 0.3;
+export const ACCIDENT_DMG_BASE = 25, ACCIDENT_DMG_RAND = 20;
+export const DEBRIS_BASE_CHANCE = 0.012;        // densité de base des débris
+export const DEBRIS_DENSITY = { pierrier: 3, regs: 2, dunes: 1.2, defaut: 1 };
+export const DEBRIS_SPEED_REF = 30;             // vitesse de référence (m/s)
+export const DEBRIS_RISK_FACTOR = { haut: 1.6, normal: 1, bas: 0.6 };
+export const DEBRIS_ANIMAL_FATIGUE = 2;          // fatigue d'une manœuvre d'évitement
+
+// ========== DERNIERS COEFFICIENTS SIM ==========
+export const OVERTAKE_NIGHT_GRIP_LOSS = 0.3;   // l'obscurité réduit l'adhérence exploitée (μ)
+export const RAIN_GRIP_FACTOR = 0.6;           // pluie/tempête de sable: l'adhérence chute
+
+// ========== GÉNÉRATEUR DE MONDE ==========
+export const GEN_END_SHARE = 0.5;              // B à 50% de l'arc cible (marge sinueux)
+export const GEN_WAYPOINT_MIN_STEP_M = 2000;   // dernier waypoint serré à l'arrivée
+export const GEN_LATERAL_SPREAD = 0.45;        // amplitude d'errance latérale des waypoints
+export const GEN_LATERAL_STEP = 0.4;           // écart candidats latéraux
+export const GEN_PROG_MIN_SHARE = 0.45;        // progression minimale vers B par saut
+export const GEN_WET_COST_THRESHOLD = 0.5;     // au-delà: le sol coûte
+export const GEN_DETAIL_EXPONENT = 1.5, GEN_DETAIL_GAIN = 2.0;
+export const GEN_DETOUR_COST = 0.05;           // coût de détour par candidat
+export const GEN_HAIRPIN_MIN_DEFLECTION = 1.9; // épingle: déflexion min (rad)
+export const GEN_HAIRPIN_MAX_SHARE = 0.98;     // épingle: part de π
+export const GEN_STRAIGHT_DRIFT_CORRECTION = 0.035; // rappel du cap vers B sur les droites
+export const GEN_CURV_PHASE_EASE = 0.5;        // lissage courbure dans l'arc
+export const GEN_COUNTER_STEER = 0.7;          // contre-braquage du relief (veto)
+export const GEN_CONTINENTAL_MIN = 0.4, GEN_CONTINENTAL_GAIN = 0.6, GEN_ALT_BASE_SHARE = 0.5;
+export const CONVERGENCE_EFF = 0.98;   // rendement d'équilibre énergie (stabilité numérique)
+export const CONVERGENCE_V_MIN = 0.5;  // plancher de vitesse de l'itération (m/s)

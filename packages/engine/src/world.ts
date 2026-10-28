@@ -1,4 +1,10 @@
 import { Rng } from "./rng";
+import {
+  GEN_END_SHARE, GEN_WAYPOINT_MIN_STEP_M, GEN_LATERAL_SPREAD, GEN_LATERAL_STEP, GEN_PROG_MIN_SHARE,
+  GEN_WET_COST_THRESHOLD, GEN_DETAIL_EXPONENT, GEN_DETAIL_GAIN, GEN_DETOUR_COST,
+  GEN_HAIRPIN_MIN_DEFLECTION, GEN_HAIRPIN_MAX_SHARE, GEN_STRAIGHT_DRIFT_CORRECTION,
+  GEN_CURV_PHASE_EASE, GEN_COUNTER_STEER, GEN_CONTINENTAL_MIN, GEN_CONTINENTAL_GAIN, GEN_ALT_BASE_SHARE,
+} from "./calibration";
 import { Biome, Station, TerrainSegment, TerrainType, World, WeatherFront } from "./types";
 
 export interface WorldGenParams {
@@ -163,7 +169,7 @@ export class WorldGenerator {
     // converge vers la longueur cible — calibration itérative: on trace une
     // première fois, on mesure le ratio arc/vol-d'oiseau, on replace B.
     // (le sinueux émergent d'une piste fait 1,2-1,4× le vol d'oiseau)
-    this.endX = this.totalKm * 1000 * 0.5;
+    this.endX = this.totalKm * 1000 * GEN_END_SHARE;
     this.endY = this.rng.range(-0.15, 0.15) * this.endX;
 
     this.buildPath();
@@ -210,7 +216,7 @@ export class WorldGenerator {
     const n = this.noise.fbm(gx * 500, gy * 500, cfg.scale, 2);
     const base = cfg.altBase + (n - 0.5) * 2 * cfg.amp;
     const t = Math.min(1, Math.hypot(gx * 500, gy * 500) / (this.totalKm * 1000));
-    const alt = Math.max(0, base * (0.4 + 0.6 * t) + cfg.altBase * 0.5);
+    const alt = Math.max(0, base * (GEN_CONTINENTAL_MIN + GEN_CONTINENTAL_GAIN * t) + cfg.altBase * GEN_ALT_BASE_SHARE);
     if (this.altCache.size < 400000) this.altCache.set(key, alt);
     return alt;
   }
@@ -257,7 +263,7 @@ export class WorldGenerator {
     const WPT_SPACING = 8000;
     while (Math.hypot(end.x - cx, end.y - cy) > 2000 && guard++ < 4000) {
       const distNow = Math.hypot(end.x - cx, end.y - cy);
-      const stepW = Math.min(WPT_SPACING, Math.max(2000, distNow * 0.5));
+      const stepW = Math.min(WPT_SPACING, Math.max(GEN_WAYPOINT_MIN_STEP_M, distNow * GEN_END_SHARE));
       const toEnd = Math.atan2(end.y - cy, end.x - cx);
       const kmHere = this.km0(cx, cy, totalM, this.totalKm);
       const latFactor = this.biomeLateralFactor(kmHere);
@@ -265,14 +271,14 @@ export class WorldGenerator {
       const perpX = -Math.sin(toEnd), perpY = Math.cos(toEnd);
       let best: { x: number; y: number; c: number } | null = null;
       for (let k = -2; k <= 2; k++) {
-        const off = (lateral + k * 0.4) * stepW * 0.45;
+        const off = (lateral + k * GEN_LATERAL_STEP) * stepW * GEN_LATERAL_SPREAD;
         const nx = cx + Math.cos(toEnd) * stepW + perpX * off;
         const ny = cy + Math.sin(toEnd) * stepW + perpY * off;
-        if (Math.hypot(end.x - nx, end.y - ny) > distNow - stepW * 0.45) continue;
+        if (Math.hypot(end.x - nx, end.y - ny) > distNow - stepW * GEN_PROG_MIN_SHARE) continue;
         const cfg = BIOME_RELIEF[this.biomeAt(kmHere)];
         const wet = this.wetnessAt(nx, ny);
         const detail = this.detailNoise.fbm(nx, ny, 350, 2);
-        const c = Math.max(0, wet - 0.5) * cfg.costWet + Math.pow(Math.abs(detail - 0.5) * 2, 1.5) * 2.0 + Math.abs(k) * 0.05;
+        const c = Math.max(0, wet - GEN_WET_COST_THRESHOLD) * cfg.costWet + Math.pow(Math.abs(detail - 0.5) * 2, GEN_DETAIL_EXPONENT) * GEN_DETAIL_GAIN + Math.abs(k) * GEN_DETOUR_COST;
         if (!best || c < best.c) best = { x: nx, y: ny, c };
       }
       if (!best) best = { x: cx + Math.cos(toEnd) * stepW, y: cy + Math.sin(toEnd) * stepW, c: 0 };
@@ -364,7 +370,7 @@ export class WorldGenerator {
             // rayon franc + déflexion; l'épingle élargit la déflexion
             const radius = this.rng.range(pace.radiusMin, pace.radiusMax);
             let defl = this.rng.range(0.45, 1.75); // 25°-100°
-            if (this.rng.chance(pace.hairpinChance)) defl = this.rng.range(1.9, Math.PI * 0.98); // épingle 110-177°
+            if (this.rng.chance(pace.hairpinChance)) defl = this.rng.range(GEN_HAIRPIN_MIN_DEFLECTION, Math.PI * GEN_HAIRPIN_MAX_SHARE);
             turnSign = this.rng.chance(0.5) ? 1 : -1;
             // biais: le virage tourne de préférence vers le waypoint
             let err = toWp - heading;
@@ -391,14 +397,14 @@ export class WorldGenerator {
         let err = toWp - heading;
         while (err > Math.PI) err -= 2 * Math.PI;
         while (err < -Math.PI) err += 2 * Math.PI;
-        heading += err * 0.035; // doux mais tient B sur les droites
+        heading += err * GEN_STRAIGHT_DRIFT_CORRECTION;
       }
 
       // --- courbure de la phase (clothoïdes = montée/descente progressive) ---
       const ease = 0.18 + 0.82 * Math.min(1, step / 25);
       if (phase.kind === "straight") curv = curv * (1 - ease);
       else if (phase.kind === "entry") curv += (phase.targetCurv - curv) * ease;
-      else if (phase.kind === "turn") curv += (phase.targetCurv - curv) * 0.5;
+      else if (phase.kind === "turn") curv += (phase.targetCurv - curv) * GEN_CURV_PHASE_EASE;
       else curv += (0 - curv) * ease;
 
       // VETO relief: si la courbure actuelle mène à du franchissable-impossible,
@@ -412,7 +418,7 @@ export class WorldGenerator {
         return slope <= this.cfgOf(biome).maxSlope * 1.2 && wet < 0.8;
       };
       if (phase.kind === "turn" && !aheadOK(curv)) {
-        curv = -curv * 0.7; // contre-braquage: le relief renvoie la piste
+        curv = -curv * GEN_COUNTER_STEER;
         phase.targetCurv = curv;
       }
 
