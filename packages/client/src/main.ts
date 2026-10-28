@@ -1012,11 +1012,12 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
   };
   const carAngle = Math.atan2(meAhead.y - meRoad.y, meAhead.x - meRoad.x);
 
-  // CAMÉRA ARRIÈRE (poursuite): le point visé est EN RETRAIT derrière la
-  // voiture — on la voit de dos, elle grimpe vers le haut de l'écran quand
-  // elle accélère. L'angle suit le cap franchement.
-  const targetX = me.x - Math.cos(carAngle) * 8;
-  const targetY = me.y - Math.sin(carAngle) * 8;
+  // CAMÉRA ARRIÈRE (poursuite): la cible est la POSITION de la voiture, mais
+  // le suivi est RETARDÉ (10%/frame). En accélérant, la voiture s'élève dans
+  // le cadre (vers le haut), la caméra la rattrape — vraie caméra de poursuite.
+  // La voiture est ancrée à 30% du bas: on voit sa DERRIÈRE et la route loin devant.
+  const targetX = me.x;
+  const targetY = me.y;
   if (!camInit) { camX = targetX; camY = targetY; camAngle = carAngle; camInit = true; }
   const follow = 0.10;
   camX += (targetX - camX) * follow;
@@ -1024,15 +1025,15 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
   let dAng = carAngle - camAngle;
   while (dAng > Math.PI) dAng -= 2 * Math.PI;
   while (dAng < -Math.PI) dAng += 2 * Math.PI;
-  camAngle += dAng * 0.15;
+  camAngle += dAng * 0.25;
 
   // transformation monde -> écran
   const W2S = (x: number, y: number): [number, number] => {
     const dx = x - camX, dy = y - camY;
     const rx = dx * Math.cos(-camAngle) - dy * Math.sin(-camAngle);
     const ry = dx * Math.sin(-camAngle) + dy * Math.cos(-camAngle);
-    // voiture basse à l'écran: 30% du bas → la route s'étire loin devant
-    return [w / 2 + rx * PXM, h * 0.70 + ry * PXM];
+    // voiture à 30% du bas: on la voit de dos, la route s'étire loin devant
+    return [w / 2 + rx * PXM, h * 0.30 + ry * PXM];
   };
 
   // sol
