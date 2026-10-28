@@ -846,194 +846,260 @@ cv.addEventListener("wheel", (e) => {
 });
 
 
-// ===== Vue 2D plate =====
-function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPublic | undefined, now: number, _dt: number): void {
-  ctx.save();
-  ctx.translate(w / 2, h * 0.55);
-  ctx.scale(camZoom, camZoom);
-  ctx.translate(-w / 2, -h * 0.55);
+// ===== Vue 2D de haut — route ancrée au monde, caméra suit la voiture =====
+// Géométrie de l'itinéraire : dévers latéral (mètres) en fonction du km, déterministe.
+// C'est cette fonction qui donne les virages — la route change réellement avec la position.
+function roadZ(k: number, seed: number): number {
+  const p1 = ((seed % 977) / 977) * Math.PI * 2;
+  const p2 = ((seed % 613) / 613) * Math.PI * 2;
+  const p3 = ((seed % 331) / 331) * Math.PI * 2;
+  return (
+    60 * Math.sin(k * 1.7 + p1) +
+    35 * Math.sin(k * 0.9 + p2) +
+    18 * Math.sin(k * 3.8 + p3)
+  );
+}
 
+function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPublic | undefined, now: number, dt: number): void {
+  const seed = state?.world?.seed ?? 1;
+  // échelle : ~170 m visibles de large — à 50 km/h le décor défile à ~75 px/s (fluide)
+  const PXM = (w / 170) * camZoom;          // pixels par mètre
+  const zCar = roadZ(km, seed);
+  const SX = (k: number) => w / 2 + (k - km) * 1000 * PXM;
+  const SY = (k: number) => h * 0.52 - (roadZ(k, seed) - zCar) * PXM;
+  const eps = 0.008;
+  const roadAngle = (k: number) =>
+    Math.atan2(SY(k + eps) - SY(k - eps), SX(k + eps) - SX(k - eps));
+
+  // sol
   ctx.fillStyle = BIOME_COLORS[seg?.biome ?? "steppe"];
-  ctx.fillRect(-w, -h, w * 3, h * 3);
+  ctx.fillRect(0, 0, w, h);
 
-  // Ancrage monde: hash sur la position absolue — les entités ne bougent jamais avec la voiture
-  const seedR = (n: number) => {
-    const x = Math.sin(n * 127.1) * 43758.5453;
-    return x - Math.floor(x);
-  };
-  // décors pré-générés sur la bande visible (±1 km autour de nous), ancrés au monde
-  const decorKmStart = Math.floor((km - 1) * 8) / 8; // pas de 125 m
-  const decorCount = Math.ceil((km + 1 - decorKmStart) * 8);
-  for (let di = 0; di < decorCount; di++) {
-    const dkm = decorKmStart + di / 8;
-    const rel = dkm - km; // -1..+1 km autour
-    const sx = w / 2 + (rel / 0.7) * w * 0.5;
-    if (sx < -60 || sx > w + 60) continue;
-    const r1 = seedR(Math.floor(dkm * 8) * 3 + 1);
-    const r2 = seedR(Math.floor(dkm * 8) * 7 + 2);
-    const r3 = seedR(Math.floor(dkm * 8) * 11 + 3);
-    const oy = h * 0.45 + r2 * h * 0.5;
-    if (r3 < 0.45) {
-      ctx.fillStyle = "rgba(90,80,65,0.8)";
-      ctx.beginPath();
-      ctx.ellipse(sx, oy, 5 + r1 * 9, 4 + r1 * 6, 0, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (seg?.biome === "steppe" || seg?.biome === "humide") {
-      ctx.fillStyle = seg.biome === "humide" ? "rgba(40,90,50,0.7)" : "rgba(70,110,50,0.6)";
-      ctx.beginPath();
-      ctx.ellipse(sx, oy, 6 + r1 * 6, 5 + r2 * 5, 0, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-  for (let i = 0; i < 7; i++) {
-    const bx = (i * w) / 6 - w * 0.08;
-    const bh = h * (0.12 + seedR(i + 1) * 0.22);
-    ctx.fillStyle = "rgba(0,0,0,0.09)";
-    ctx.beginPath();
-    ctx.moveTo(bx - w * 0.1, h * 0.42);
-    ctx.quadraticCurveTo(bx + w * 0.09, h * 0.42 - bh, bx + w * 0.28, h * 0.42);
-    ctx.fill();
-  }
-  if (seedR(Math.floor(now / 8000)) < 0.25) {
-    const ax = w * 0.15 + seedR(Math.floor(now / 8000) + 1) * w * 0.7;
-    ctx.fillStyle = "rgba(120,90,60,0.85)";
-    ctx.beginPath();
-    ctx.ellipse(ax, h * 0.78, 10, 5, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.ellipse(ax + 11, h * 0.78 - 3, 4, 3.5, 0, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  const roadW = seg?.width === "etroite" ? 26 : seg?.width === "moyenne" ? 36 : 48;
-  ctx.strokeStyle = "rgba(107,91,67,0.95)";
-  ctx.lineWidth = roadW;
+  // route : polyligne échantillonnée sur ±150 m autour de la voiture
+  const half = 0.15;
+  const step = 0.004;
+  const roadWm = seg?.width === "etroite" ? 5 : seg?.width === "moyenne" ? 7 : 9; // demi-largeur en m
+  ctx.strokeStyle = "#6b5b43";
+  ctx.lineWidth = roadWm * 2 * PXM;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
   ctx.beginPath();
-  ctx.moveTo(0, h * 0.7);
-  ctx.bezierCurveTo(w * 0.3, h * 0.58, w * 0.6, h * 0.78, w, h * 0.62);
+  for (let k = km - half; k <= km + half; k += step) {
+    const x = SX(k), y = SY(k);
+    if (k <= km - half + step) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
   ctx.stroke();
-  ctx.strokeStyle = "rgba(0,0,0,0.12)";
-  ctx.lineWidth = roadW * 0.18;
-  ctx.setLineDash([12, 16]);
+  // bas-côtés
+  ctx.strokeStyle = "rgba(200,180,140,0.55)";
+  ctx.lineWidth = 1.6 * PXM;
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    for (let k = km - half; k <= km + half; k += step) {
+      const a = roadAngle(k);
+      const nx = -Math.sin(a) * side, ny = Math.cos(a) * side;
+      const x = SX(k) + nx * (roadWm + 1) * PXM;
+      const y = SY(k) + ny * (roadWm + 1) * PXM;
+      if (k <= km - half + step) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  // ligne centrale pointillée
+  ctx.strokeStyle = "rgba(230,220,190,0.5)";
+  ctx.lineWidth = 0.35 * PXM;
+  ctx.setLineDash([3 * PXM, 4 * PXM]);
+  ctx.beginPath();
+  for (let k = km - half; k <= km + half; k += step) {
+    const x = SX(k), y = SY(k);
+    if (k <= km - half + step) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
   ctx.stroke();
   ctx.setLineDash([]);
 
-  ctx.font = "10px sans-serif";
-  const nextBorne = Math.ceil(km / 10) * 10;
-  for (let b = -2; b <= 2; b++) {
-    const bkm = nextBorne + b * 10;
-    if (bkm < 0) continue;
-    const rel = bkm - km;
-    if (Math.abs(rel) > 0.35) continue;
-    const bx = w / 2 + (rel / 0.35) * w * 0.42;
-    ctx.fillStyle = "#efe8dc";
-    ctx.fillRect(bx - 1, h * 0.7 - 14, 2, 14);
-    ctx.fillStyle = "#3a332a";
-    ctx.fillText(`${bkm}`, bx - 10, h * 0.7 - 17);
-  }
-  for (const st of state?.world.stations ?? []) {
-    const rel = st.km - km;
-    if (rel > -0.05 && rel < 0.35) {
-      const sx = w / 2 + (rel / 0.35) * w * 0.42;
-      ctx.font = "14px sans-serif";
-      ctx.fillStyle = "#fff";
-      ctx.fillText("⛽", sx, h * 0.7 - 26);
-      if (st.hasHotel) ctx.fillText("🏨", sx + 16, h * 0.7 - 26);
-      ctx.font = "10px sans-serif";
+  // décors ancrés au monde : tous les 15 m, rochers/végétation selon biome
+  const hash = (n: number) => {
+    const x = Math.sin(n * 127.1) * 43758.5453;
+    return x - Math.floor(x);
+  };
+  const decorStep = 0.015;
+  const dStart = Math.floor((km - half) / decorStep) * decorStep;
+  for (let k = dStart; k <= km + half; k += decorStep) {
+    const idx = Math.round(k / decorStep);
+    const r1 = hash(idx * 3 + 1), r2 = hash(idx * 7 + 2), r3 = hash(idx * 11 + 3);
+    if (r3 < 0.4) continue; // espacement
+    const side = r2 < 0.5 ? -1 : 1;
+    const dist = roadWm + 4 + r1 * 40; // m du bord de la route
+    const a = roadAngle(k);
+    const nx = -Math.sin(a) * side, ny = Math.cos(a) * side;
+    const x = SX(k) + nx * dist * PXM;
+    const y = SY(k) + ny * dist * PXM;
+    if (x < -30 || x > w + 30 || y < -30 || y > h + 30) continue;
+    const sz = (0.8 + r1 * 2.2) * PXM;
+    if (r3 < 0.7) {
+      ctx.fillStyle = "rgba(95,85,68,0.9)";
+      ctx.beginPath();
+      ctx.ellipse(x, y, sz, sz * 0.75, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (seg?.biome === "desert") {
+      ctx.strokeStyle = "rgba(110,140,80,0.8)";
+      ctx.lineWidth = Math.max(1, 0.3 * PXM);
+      ctx.beginPath();
+      ctx.moveTo(x, y + sz);
+      ctx.lineTo(x, y - sz * 1.4);
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - sz * 0.7, y - sz * 0.9);
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + sz * 0.7, y - sz * 0.9);
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = seg?.biome === "humide" ? "rgba(45,100,55,0.85)" : "rgba(75,115,55,0.8)";
+      ctx.beginPath();
+      ctx.ellipse(x, y, sz * 1.2, sz, 0, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 
-  const cx = w / 2, cy = h * 0.7;
-  const drawCar = (x: number, y: number, color: string, label: string | undefined, moving: boolean) => {
-    const bounce = moving ? Math.sin(now / 90 + x) * 1.5 : 0;
-    ctx.fillStyle = "rgba(0,0,0,0.25)";
-    ctx.beginPath();
-    ctx.ellipse(x, y + 13, 27, 8, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#1a1a1a";
-    for (const wx of [x - 27, x - 19, x + 19, x + 27]) {
-      ctx.fillRect(wx, y - 9 + bounce, 8, 18);
-      if (moving) {
-        ctx.fillStyle = "#555";
-        const spin = Math.sin(now / 60 + wx) * 6;
-        ctx.fillRect(wx, y - 4 + bounce + spin * 0.4, 8, 3);
-        ctx.fillStyle = "#1a1a1a";
-      }
+  // bornes hectométriques le long de la route (tous les 100 m) + kilométriques
+  const borneStep = 0.1;
+  for (let k = Math.floor((km - half) / borneStep) * borneStep; k <= km + half; k += borneStep) {
+    const isKm = Math.abs(k - Math.round(k)) < 0.001 && Math.round(k) % 1 === 0;
+    const a = roadAngle(k);
+    const side = 1;
+    const x = SX(k) - Math.sin(a) * side * (roadWm + 1.5) * PXM;
+    const y = SY(k) + Math.cos(a) * side * (roadWm + 1.5) * PXM;
+    ctx.fillStyle = isKm ? "#efe8dc" : "rgba(220,210,190,0.6)";
+    const bh = (isKm ? 2.2 : 1.3) * PXM;
+    ctx.fillRect(x - 0.25 * PXM, y - bh, 0.5 * PXM, bh);
+    if (isKm && PXM > 2.5) {
+      ctx.fillStyle = "#3a332a";
+      ctx.font = `${Math.max(8, 3 * PXM)}px sans-serif`;
+      ctx.fillText(`${Math.round(k)}`, x + 2, y - bh - 2);
     }
+  }
+
+  // panneaux station / hôtel à l'approche (±150 m)
+  for (const st of state?.world?.stations ?? []) {
+    if (Math.abs(st.km - km) > half) continue;
+    const x = SX(st.km), y = SY(st.km) - (roadWm + 6) * PXM;
+    ctx.font = `${Math.max(12, 5 * PXM)}px sans-serif`;
+    ctx.fillText("⛽", x - 8, y);
+    if (st.hasHotel) ctx.fillText("🏨", x + 6, y);
+  }
+
+  // voiture orientée selon la route
+  const drawCarRot = (k: number, color: string, moving: boolean, label?: string) => {
+    const x = SX(k), y = SY(k);
+    const a = roadAngle(k);
+    const L = 2.3, W = 1.05; // mètres (échelle réelle)
+    const bounce = moving ? Math.sin(now / 90 + k) * 0.06 : 0;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(a);
+    // ombre
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    ctx.beginPath();
+    ctx.ellipse(0, W * PXM * 0.7, L * PXM, W * PXM * 0.55, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // roues
+    ctx.fillStyle = "#1a1a1a";
+    for (const [wx, wz] of [[L - 0.7, -W - 0.15], [L - 0.7, W + 0.15], [-L + 0.7, -W - 0.15], [-L + 0.7, W + 0.15]] as [number, number][]) {
+      ctx.fillRect((wx - 0.5) * PXM, (wz - 0.35) * PXM, 1 * PXM, 0.7 * PXM);
+    }
+    // caisse
+    const b = bounce * PXM;
     ctx.fillStyle = color;
-    ctx.fillRect(x - 24, y - 14 + bounce, 48, 24);
+    ctx.fillRect((-L) * PXM, (-W + b) * PXM, 2 * L * PXM, 2 * W * PXM);
     ctx.fillStyle = "rgba(0,0,0,0.15)";
-    ctx.fillRect(x - 24, y + 4 + bounce, 48, 6);
+    ctx.fillRect((-L) * PXM, (W * 0.4 + b) * PXM, 2 * L * PXM, W * 0.6 * PXM);
+    // pare-brise (vers l'avant = +x local)
     ctx.fillStyle = "#9cf";
-    ctx.fillRect(x - 14, y - 9 + bounce, 20, 9);
+    ctx.fillRect((L * 0.15) * PXM, (-W * 0.75 + b) * PXM, L * 0.5 * PXM, W * 1.5 * PXM);
+    ctx.restore();
     if (label) {
       ctx.fillStyle = "#fff";
       ctx.font = "11px sans-serif";
-      ctx.fillText(label, x - 18, y - 22 + bounce);
+      ctx.fillText(label, x - 18, y - (W + 2) * PXM);
     }
+    return { x, y, a };
   };
 
+  // concurrents proches sur la route
   if (myPub) {
     for (const c of state!.cars) {
       if (c.playerId === myId) continue;
       const gap = c.positionKm - myPub.positionKm;
-      if (Math.abs(gap) < 0.35) {
-        const rel = gap / 0.35;
-        drawCar(cx + rel * w * 0.35, cy - 14, c.color, state!.players.find((p) => p.id === c.playerId)?.pseudo, c.speedKmh > 2);
+      if (Math.abs(gap) < half) {
+        drawCarRot(c.positionKm, c.color, c.speedKmh > 2, state!.players.find((p) => p.id === c.playerId)?.pseudo);
       }
     }
-    drawCar(cx, cy, myPub.color, undefined, myPub.speedKmh > 2);
+    const me = drawCarRot(km, myPub.color, myPub.speedKmh > 2);
+    // états au-dessus de ma voiture
     if (myPub.immobilized) {
       ctx.fillStyle = "#e66";
       ctx.font = "bold 13px sans-serif";
-      ctx.fillText("⚠ " + (myPub.immobilizedReason ?? ""), cx - 60, cy - 32);
+      ctx.fillText("⚠ " + (myPub.immobilizedReason ?? ""), me.x - 60, me.y - 34);
     } else if (myPub.sleeping) {
       ctx.fillStyle = "#ccc";
       ctx.font = "13px sans-serif";
-      ctx.fillText("💤 bivouac / repos en cours", cx - 70, cy - 32);
+      ctx.fillText("💤 repos en cours", me.x - 60, me.y - 34);
     }
+    // poussière derrière la voiture (sens inverse de la marche)
     if (myPub.speedKmh > 5) {
       if (dustParticles.length < 40 && Math.random() < 0.5) {
-        dustParticles.push({ x: cx - 30, y: cy + 6, vx: -30 - Math.random() * 40, vy: -10 + Math.random() * 20, life: 1 });
+        dustParticles.push({ x: km - 0.004, y: 0, vx: -0.02 - Math.random() * 0.02, vy: 0, life: 1 });
       }
       for (const p of dustParticles) {
-        p.x += p.vx * _dt;
-        p.y += p.vy * _dt;
-        p.life -= _dt * 1.4;
+        p.x += p.vx * dt;
+        p.life -= dt * 1.4;
+        const px = SX(p.x), py = SY(p.x);
         ctx.fillStyle = `rgba(180,160,120,${Math.max(0, p.life) * 0.5})`;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 3 + (1 - p.life) * 6, 0, Math.PI * 2);
+        ctx.arc(px, py, (1 + (1 - p.life) * 2.5) * PXM, 0, Math.PI * 2);
         ctx.fill();
       }
       dustParticles = dustParticles.filter((p) => p.life > 0);
     }
+    // cône de phares orienté vers l'avant
+    const hour = state ? hourOfDay(state.tick) : 12;
+    const dark = hour >= 21 || hour < 5 ? 0.75 : hour >= 19 ? ((hour - 19) / 2) * 0.75 : hour < 7 ? ((7 - hour) / 2) * 0.75 : 0;
+    if (dark > 0.05) {
+      ctx.save();
+      ctx.translate(me.x, me.y);
+      ctx.rotate(me.a);
+      const grad = ctx.createLinearGradient(2 * PXM, 0, 60 * PXM, 0);
+      grad.addColorStop(0, `rgba(255,240,170,${0.35 * dark + 0.15})`);
+      grad.addColorStop(1, "rgba(255,240,170,0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(2 * PXM, -2 * PXM);
+      ctx.lineTo(60 * PXM, -16 * PXM);
+      ctx.lineTo(60 * PXM, 16 * PXM);
+      ctx.lineTo(2 * PXM, 2 * PXM);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
   }
 
-  const hour = state ? hourOfDay(state.tick) : 12;
-  const dark = hour >= 21 || hour < 5 ? 0.75 : hour >= 19 ? ((hour - 19) / 2) * 0.75 : hour < 7 ? ((7 - hour) / 2) * 0.75 : 0;
-  if (dark > 0.05) {
-    ctx.fillStyle = `rgba(10,10,30,${dark})`;
-    ctx.fillRect(-w, -h, w * 3, h * 3);
-    const grad = ctx.createRadialGradient(cx + 55, cy, 8, cx + 55, cy, 130 * camZoom);
-    grad.addColorStop(0, "rgba(255,240,170,0.4)");
-    grad.addColorStop(1, "rgba(255,240,170,0)");
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.moveTo(cx + 18, cy - 6);
-    ctx.lineTo(cx + 250 * camZoom, cy - 75 * camZoom);
-    ctx.lineTo(cx + 250 * camZoom, cy + 65 * camZoom);
-    ctx.closePath();
-    ctx.fill();
+  // voile nuit plein écran (au-dessus du monde, sous le HUD)
+  const hour2 = state ? hourOfDay(state.tick) : 12;
+  const dark2 = hour2 >= 21 || hour2 < 5 ? 0.55 : hour2 >= 19 ? ((hour2 - 19) / 2) * 0.55 : hour2 < 7 ? ((7 - hour2) / 2) * 0.55 : 0;
+  if (dark2 > 0.05) {
+    ctx.fillStyle = `rgba(10,10,30,${dark2})`;
+    ctx.fillRect(0, 0, w, h);
   }
 
+  // météo visible en course
   const weather = myPub?.weather ?? "clair";
   if (weather === "pluie_diluvienne" || weather === "grele") {
     if (rainDrops.length < 120) for (let i = 0; i < 6; i++) rainDrops.push({ x: Math.random() * w, y: Math.random() * h });
     ctx.strokeStyle = weather === "grele" ? "rgba(220,230,255,0.7)" : "rgba(160,190,230,0.6)";
     ctx.lineWidth = weather === "grele" ? 2.5 : 1.2;
     for (const d of rainDrops) {
-      d.y += (weather === "grele" ? 300 : 480) * _dt;
-      d.x -= 60 * _dt;
+      d.y += (weather === "grele" ? 300 : 480) * dt;
+      d.x -= 60 * dt;
       ctx.beginPath();
       ctx.moveTo(d.x, d.y);
       ctx.lineTo(d.x - 3, d.y + 10);
@@ -1041,13 +1107,13 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
       if (d.y > h) { d.y = -10; d.x = Math.random() * (w * 1.1); }
     }
     if (weather === "grele" && Math.random() < 0.008) {
-      ctx.fillStyle = "rgba(255,255,200,0.9)";
+      ctx.fillStyle = "rgba(255,255,200,0.75)";
       ctx.fillRect(0, 0, w, h);
     }
   } else rainDrops = [];
   if (weather === "tempete_sable") {
-    ctx.fillStyle = "rgba(190,150,90,0.35)";
-    ctx.fillRect(-w, -h, w * 3, h * 3);
+    ctx.fillStyle = "rgba(190,150,90,0.32)";
+    ctx.fillRect(0, 0, w, h);
     for (let i = 0; i < 40; i++) {
       const sx = ((now / 8 + i * 97) % (w + 100)) - 50;
       const sy = (i * 53) % h;
@@ -1056,22 +1122,24 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     }
   }
   if (weather === "brouillard") {
-    ctx.fillStyle = "rgba(200,200,200,0.35)";
-    ctx.fillRect(-w, -h, w * 3, h * 3);
+    ctx.fillStyle = "rgba(200,200,200,0.3)";
+    ctx.fillRect(0, 0, w, h);
   }
   if (weather === "canicule") {
     const hg = ctx.createLinearGradient(0, 0, 0, h);
-    hg.addColorStop(0, "rgba(255,180,80,0.15)");
+    hg.addColorStop(0, "rgba(255,180,80,0.13)");
     hg.addColorStop(1, "rgba(255,180,80,0)");
     ctx.fillStyle = hg;
-    ctx.fillRect(-w, -h, w * 3, h * 3);
+    ctx.fillRect(0, 0, w, h);
   }
   if (weather === "froid_intense") {
-    ctx.fillStyle = "rgba(180,200,255,0.12)";
-    ctx.fillRect(-w, -h, w * 3, h * 3);
+    ctx.fillStyle = "rgba(180,200,255,0.1)";
+    ctx.fillRect(0, 0, w, h);
   }
-
-  ctx.restore();
+  if (weather === "piste_endommagee") {
+    ctx.fillStyle = "rgba(120,60,40,0.25)";
+    ctx.fillRect(0, h * 0.35, w, h * 0.35);
+  }
 }
 
 function render(): void {
