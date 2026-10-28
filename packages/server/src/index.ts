@@ -44,10 +44,14 @@ if (!config && !RaceHost.restore(SNAP_DIR)) {
 let host = RaceHost.restore(SNAP_DIR) || new RaceHost(config!, SNAP_DIR);
 // (après restore, le monde est régénéré depuis la graine — host.race.world est complet)
 
-// Résumé du tracé (1 point / km) précalculé — évite de filtrer 300k points à chaque broadcast
-const pathSummary = host.race.world.points
-  ? host.race.world.points.filter((_: any, i: number) => i % 50 === 0).map((p: any) => ({ x: p.x, y: p.y, km: p.km }))
-  : [];
+// Résumé du tracé (1 point / km) — recalculé après un reset de course
+let pathSummary: { x: number; y: number; km: number }[] = [];
+function recomputePathSummary(): void {
+  pathSummary = host.race.world.points
+    ? host.race.world.points.filter((_: any, i: number) => i % 50 === 0).map((p: any) => ({ x: p.x, y: p.y, km: p.km }))
+    : [];
+}
+recomputePathSummary();
 
 // Rattrapage après coupure : le serveur rattrape le temps réel manqué depuis le dernier snapshot
 if (host.race.started && !host.race.paused && host.wallClockSnapshot) {
@@ -278,6 +282,29 @@ wss.on("connection", (ws) => {
         if (!client.isAdmin) return;
         const steps = Math.min(3600 * 24 * 30, (msg.steps | 0));
         for (let i = 0; i < steps; i++) race.step();
+        broadcastState();
+        break;
+      }
+      case "admin_reset": {
+        if (!client.isAdmin) return;
+        // course neuve: même graine (reset propre) ou nouvelle graine
+        const newSeed = msg.newSeed ? Math.random().toString(36).slice(2, 10) : host.config.seedText;
+        config = {
+          seedText: newSeed,
+          targetHours: host.config.targetHours,
+          startIntervalSeconds: host.config.startIntervalSeconds,
+          programWindowMinutes: host.config.programWindowMinutes,
+          closureDelayHours: host.config.closureDelayHours,
+          accessCode: host.config.accessCode,
+          adminCode: host.config.adminCode,
+          adminPseudo: "admin",
+        };
+        host = new RaceHost(config, SNAP_DIR);
+        recomputePathSummary();
+        host.race.log("Course réinitialisée par l'admin" + (msg.newSeed ? " (nouvelle graine : " + newSeed + ")" : ""));
+        console.log("[ADMIN] Course reset. Graine: " + newSeed);
+        // notifier les clients pour vider leur cache de chunks (nouveau monde)
+        broadcast({ type: "world_reset" });
         broadcastState();
         break;
       }

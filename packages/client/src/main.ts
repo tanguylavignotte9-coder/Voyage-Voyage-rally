@@ -93,6 +93,11 @@ function connect(): void {
   ws = new WebSocket(`${proto}://${location.host}`);
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
+    if (msg.type === "world_reset") {
+      pathChunks.clear();
+      camInit = false;
+      return;
+    }
     if (msg.type === "path_chunk") {
       pathChunks.set(msg.fromKm, msg.points);
       // purge: fenêtre glissante (max 16 chunks = 64 km autour de nous)
@@ -1073,8 +1078,9 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
       ctx.strokeStyle = "rgba(40,32,22,0.35)";
       ctx.lineWidth = 0.55 * PXM;
       ctx.beginPath();
-      // traces en offset latéral — seulement à portée de lecture (±120 m)
-      const halfTrack = Math.min(half, 0.12);
+      // traces en offset latéral — portée de lecture (±60 m; au-delà elles
+      // ressemblent à des lignes parasites le long de la route)
+      const halfTrack = Math.min(half, 0.06);
       let first = true;
       for (let k2 = km - halfTrack; k2 <= km + halfTrack; k2 += 0.002) {
         const pp = pathPoint(k2);
@@ -1403,6 +1409,12 @@ function render(): void {
   ctx.font = "13px sans-serif";
   const spd = myPub?.speedKmh ?? 0;
   ctx.fillText(`${spd.toFixed(0)} km/h`, 12, h - 11);
+  const paceTxt = PACE_FR[myCar()?.pace ?? ""] ?? "";
+  if (paceTxt) {
+    ctx.fillStyle = (myCar()?.pace === "attaque" || myCar()?.pace === "soutenue") ? "#7c7" : "#cc7";
+    ctx.fillText(`Allure : ${paceTxt}`, 90, h - 11);
+    ctx.fillStyle = "#efe8dc";
+  }
   ctx.fillText(`${WEATHER_ICON[weather] ?? ""} ${WEATHER_FR[weather] ?? weather}`, 100, h - 11);
   ctx.fillText(`${(myPub?.positionKm ?? 0).toFixed(1)} km`, w - 110, h - 11);
   // Prévision ~12 h : fronts qui toucheront ma position (annonce, précis à 12 h)
@@ -1440,6 +1452,14 @@ function addAdminButtons(): void {
     bar.appendChild(b);
   };
   mk("Départ", () => send({ type: "admin_start" }));
+  const mkConfirm = (label: string, msg: any, question: string) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.onclick = () => { if (confirm(question)) send(msg); };
+    bar.appendChild(b);
+  };
+  mkConfirm("↺ Reset course", { type: "admin_reset", newSeed: false }, "Réinitialiser toute la course ? (même graine, tout le monde repart à zéro, inscriptions rouvertes)");
+  mkConfirm("🌍 Nouvelle course", { type: "admin_reset", newSeed: true }, "Générer une NOUVELLE course (nouvelle graine, nouveau monde) ? Tout l'état actuel est perdu.");
   mk("Pause", () => send({ type: "admin_pause", paused: true }));
   mk("Reprendre", () => send({ type: "admin_pause", paused: false }));
   mk("+1h", () => send({ type: "admin_advance", steps: 3600 * 30 }));
