@@ -1,6 +1,7 @@
 import { CarState, OrganId, TerrainSegment, World, WeatherFront, Station, StationWork, TICKS_PER_HOUR, TICKS_PER_SECOND, TRUCK_FIXED_HOURS } from "./types";
 import {
-  BASE_SPEED_KMH, PACE_SPEED_FACTOR, TERRAIN_SPEED_KMH, PACE_CONSUMPTION_FACTOR,
+  CAR_MASS_KG, CAR_POWER_W, TRANSMISSION_EFF, ALTITUDE_POWER_LOSS, AERO_DRAG_COEFF, AIR_DENSITY, ROLLING_RES, LATERAL_GRIP,
+  PACE_SPEED_FACTOR, PACE_CONSUMPTION_FACTOR,
   FUEL_BASE_L_PER_100KM, FUEL_TERRAIN_FACTOR, RISK_CONSUMPTION_FACTOR, WEIGHT_SPEED_PENALTY_FULL,
   WEAR_PER_KM, WEAR_TERRAIN_FACTOR, WEAR_ORGAN_WEATHER, RISK_WEAR_FACTOR, RISK_SPEED_BONUS,
   FATIGUE_PER_HOUR, FATIGUE_NIGHT_FACTOR, FATIGUE_WEATHER_FACTOR, slopeConsumptionFactor,
@@ -22,30 +23,74 @@ export function darknessFactor(hourOfDay: number): number {
   return 0;
 }
 
+// Vitesse d'équilibre ÉMERGENTE: on cherche v tel que
+//   P_dispo × efficacité(v) = F_roulement + F_aéro(v) + F_pente + marge_virage
+// Le virage borne la vitesse par l'adhérence latérale: v_lat = sqrt(mu·g·r).
+// La pente est une FORCE réelle (gravité), pas un malus arbitraire.
+// Résolution par itérations rapides (12 passes suffisent).
 export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string, darkness: number, world?: World): number {
   const eff = settingsEffects(car.settings);
-  // Vitesse = base × allure × risque × modulation terrain (multiplicative,
-  // jamais un plafond brutal: une bonne voiture menée en attaque va plus vite
-  // qu'en prudente même en bourbier — la modulation garde le terrain pénalisant).
-  let v = BASE_SPEED_KMH * (PACE_SPEED_FACTOR[car.pace] ?? 0.85) * RISK_SPEED_BONUS[car.risk] * eff.power;
-  v *= (TERRAIN_SPEED_KMH[seg.terrain] ?? 70) / 95; // piste moyenne = neutre
-  if (seg.terrain === "pierrier" || seg.terrain === "col") v *= eff.speedRocks;
-  if (seg.slope > 0) v *= Math.max(0.5, 1 - seg.slope * 0.015);
-  else if (seg.slope < -1) v *= 1.03;
-  // les virages se négocient: courbure forte = ralentissement (plus dur en attaque/risque haut)
-  const curve = world ? curvatureAt(world, car.positionKm) : 0;
-  const curvePenalty = 1 - curve * 0.22 * (car.risk === "haut" ? 1.2 : car.risk === "bas" ? 0.8 : 1);
-  v *= curvePenalty;
-  if (weather === "tempete_sable" || weather === "pluie_diluvienne") v *= 0.35;
-  if (weather === "piste_endommagee") v *= 0.5;
-  else if (weather === "brouillard" || weather === "grele" || weather === "vent_fort") v *= 0.55;
-  else if (weather === "canicule" || weather === "froid_intense") v *= 0.85;
-  v *= 1 - darkness * 0.3;
-  if (car.fatigue > 70) v *= 1 - ((car.fatigue - 70) / 100) * 0.35;
-  if (car.crevaison) v *= 0.5;
-  v *= 1 - (car.fuel / car.fuelCapacity) * WEIGHT_SPEED_PENALTY_FULL;
-  if (car.towedBy) v *= 0.7;
-  return Math.max(0, v);
+  // puissance motrice disponible (W) — allure + risque + carto
+  // puissance à la roue: moteur × rendement transmission × altitude (le
+  // moteur perd de la puissance en haute montagne — physique, pas un cap)
+  const altLoss = 1 - ALTITUDE_POWER_LOSS * Math.min(1, Math.max(0, (seg.altitude - 200) / 3000));
+  const powerW = CAR_POWER_W * TRANSMISSION_EFF * altLoss
+    * (PACE_SPEED_FACTOR[car.pace] ?? 0.7)
+    * (RISK_SPEED_BONUS[car.risk] ?? 1.0) * eff.power;
+  // masse (carburant inclus)
+  const mass = CAR_MASS_KG + car.fuel * 0.8; // essence ~0.8 kg/L
+  const g = 9.81;
+  // forces d'environnement
+  const cr = ROLLING_RES[seg.terrain] ?? 0.04;
+  const mu = LATERAL_GRIP[seg.terrain] ?? 0.5;
+  const slopeFrac = seg.slope / 1000; // ‰ -> fraction
+  // virage: courbure moyenne signée autour de nous (fenêtre ±120 m)
+  const curve = world ? curvatureAt(world, car.positionKm) : 0; // 0..1 (normalisée R=90m)
+  const radius = curve > 0.001 ? 90 / curve : Infinity; // mètres
+  // vitesse limite en virage: v_max = sqrt(mu × g × r) × audace
+  const daring = car.risk === "haut" ? 1.0 : car.risk === "bas" ? 0.72 : 0.88;
+  const vTurn = radius === Infinity ? Infinity : Math.sqrt(mu * g * Math.max(20, radius)) * daring;
+
+  // conditions dégradantes (météo/nuit/fatigue/crevaison): agissent sur
+  // l'ADHÉRENCE et la PUISSANCE — des effets physiques, pas des caps de vitesse
+  let muEff = mu;
+  let powerEff = powerW;
+  if (weather === "tempete_sable" || weather === "pluie_diluvienne") { muEff *= 0.55; powerEff *= 0.7; }
+  if (weather === "piste_endommagee") { muEff *= 0.8; powerEff *= 0.75; }
+  else if (weather === "brouillard" || weather === "grele" || weather === "vent_fort") { powerEff *= 0.8; }
+  else if (weather === "canicule" || weather === "froid_intense") { powerEff *= 0.92; }
+  // la nuit / la fatigue: on ne voit pas loin — on lève le pied même en ligne
+  // droite ET on réduit l'audace en virage (comportement de pilote réel)
+  powerEff *= 1 - darkness * 0.25;
+  if (car.fatigue > 70) powerEff *= 1 - ((car.fatigue - 70) / 100) * 0.3;
+  // la nuit on ne voit pas: on limite l'adhérence exploitée (audace)
+  const daringEff = daring * (1 - darkness * 0.35) * (car.fatigue > 70 ? 1 - ((car.fatigue - 70) / 100) * 0.4 : 1);
+  const vTurnEff = radius === Infinity ? Infinity : Math.sqrt(muEff * g * Math.max(20, radius)) * daringEff;
+  if (car.crevaison) { /* roulage dégradé: roulement doublé */ }
+
+  const crEff = car.crevaison ? cr * 2.2 : cr;
+  const rollingF = crEff * mass * g;
+  const slopeF = slopeFrac * mass * g; // positif = côte (oppose), négatif = descente (aide)
+  const kAero = 0.5 * AIR_DENSITY * AERO_DRAG_COEFF;
+
+  // MOTRICITÉ longitudinale: la force tractrice au sol est bornée par
+  // l'adhérence (4 roues motrices: ~0.9 × mu × m × g). Sur piste meuble,
+  // la voiture ne peut pas pousser plus fort que le sol ne le permet.
+  const maxTractionF = 0.9 * muEff * mass * g;
+  // itération de résolution: v = min(P/v, F_max) / (F_roll + F_slope + k·v²)
+  let v = 20;
+  for (let i = 0; i < 14; i++) {
+    const fTotal = Math.max(50, rollingF + slopeF + kAero * v * v);
+    const fTraction = Math.min(powerEff / v, maxTractionF); // force réelle au sol
+    const vNext = (fTraction * v) / fTotal * 0.98 + 0.5; // équilibre énergie (légère traînée de convergence)
+    v = v + (vNext - v) * 0.5;
+    if (Math.abs(vNext - v) < 0.05) break;
+  }
+  // le virage borne par la physique (pas un cap arbitraire: c'est l'adhérence)
+  if (vTurnEff < v) v = vTurnEff;
+  // remorquage: force supplémentaire (on tire une autre auto)
+  if (car.towedBy) v *= 0.65;
+  return Math.max(0, v * 3.6); // m/s -> km/h
 }
 
 export interface SimContext {

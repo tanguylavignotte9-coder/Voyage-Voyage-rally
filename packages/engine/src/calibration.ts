@@ -1,17 +1,54 @@
 // Calibration réaliste — rallye raid (référence : Dakar, catégorie auto)
 // Toutes les valeurs sont en unités réelles : km/h, litres, %/km, €.
 
-// ---------- Vitesses de référence (allure soutenue, piste plate, conditions claires) ----------
-// Vitesse de base du véhicule (moteur 100%, carto neutre).
+// ========== MODÈLE PHYSIQUE ÉMERGENT (plus de hardcaps) ==========
+// La vitesse n'est JAMAIS plafonnée par une table: elle émerge de l'équilibre
+// des forces à chaque tick. P_traCTION disponible = P_max × allure × risque;
+// forces opposées: roulement (terrain), traînée aéro (∝ v²), gravité (pente),
+// tenue de route (virage). On résout P/v = ΣF (itération rapide).
+export const CAR_MASS_KG = 1900;
+export const CAR_POWER_W = 246000;          // 330 ch — une vraie préparation raid
+export const TRANSMISSION_EFF = 0.62;       // rendement roue: boîte+pont+pertes
+export const ALTITUDE_POWER_LOSS = 0.13;    // la puissance chute avec l altitude (air raréfié)
+export const AERO_DRAG_COEFF = 0.85;        // Cx × S d'un SUV
+export const AIR_DENSITY = 1.2;
+// coefficient de roulement par terrain (Cr — le "grip/roughness" réel)
+export const ROLLING_RES: Record<string, number> = {
+  piste_rapide: 0.014,
+  piste_moyenne: 0.03,
+  piste_mauvaise: 0.055,
+  regs: 0.04,
+  dunes: 0.10,
+  pierrier: 0.075,
+  col: 0.06,
+  bourbier: 0.12,
+  marécage: 0.15,
+};
+// adhérence latérale (μ) par terrain — borne la force centripète en virage
+export const LATERAL_GRIP: Record<string, number> = {
+  piste_rapide: 0.75,
+  piste_moyenne: 0.65,
+  piste_mauvaise: 0.5,
+  regs: 0.55,
+  dunes: 0.45,
+  pierrier: 0.45,
+  col: 0.5,
+  bourbier: 0.35,
+  marécage: 0.3,
+};
+
+// ---------- (legacy: allures = FRACTION DE PUISSANCE ÉMOTIONNELLE, pas vitesse) ----------
 export const BASE_SPEED_KMH = 105;
 
 // Facteurs d'allure (multiplicateurs de vitesse).
+// L'allure = puissance MOTRICE consentie (lift_and_coast = on économique).
+// La vitesse qui en découle émerge de la physique du moment.
 export const PACE_SPEED_FACTOR: Record<string, number> = {
-  lift_and_coast: 0.55,
-  prudente: 0.6,
-  normale: 0.78,
-  soutenue: 0.92,
-  attaque: 1.05, // très exigeant mécaniquement
+  lift_and_coast: 0.35,
+  prudente: 0.5,
+  normale: 0.7,
+  soutenue: 0.88,
+  attaque: 1.0, // 100% de la puissance — l'environnement décide du reste
 };
 
 // Vitesse de croisière par typologie de terrain (km/h, à soutenue).
@@ -118,7 +155,9 @@ export const FATIGUE_RECOVERY_BIVOUC_PER_HOUR = 9; // sommeil réparateur, pas c
 export const FATIGUE_RECOVERY_HOTEL_PER_HOUR = 14; // récupération complète
 
 // ---------- Risque ----------
-export const RISK_SPEED_BONUS: Record<string, number> = { bas: 0.9, normal: 1.0, haut: 1.12 };
+// Le risque = audace dans les limites physiques: on accepte d'approcher
+// la limite d'adhérence (haut) ou on garde de la marge (bas).
+export const RISK_SPEED_BONUS: Record<string, number> = { bas: 0.85, normal: 1.0, haut: 1.1 };
 export const RISK_WEAR_FACTOR: Record<string, number> = { bas: 0.6, normal: 1.0, haut: 1.8 };
 export const RISK_CONSUMPTION_FACTOR: Record<string, number> = { bas: 0.9, normal: 1.0, haut: 1.18 };
 export const RISK_ACCIDENT_FACTOR: Record<string, number> = { bas: 0.3, normal: 1.0, haut: 2.6 };
