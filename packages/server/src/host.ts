@@ -4,6 +4,7 @@ import * as path from "path";
 
 export interface RaceConfig extends RaceParams {
   accessCode: string;
+  adminCode: string;
   adminPseudo: string;
 }
 

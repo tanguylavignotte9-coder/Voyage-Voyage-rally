@@ -20,6 +20,7 @@ if (args[0] === "create") {
     programWindowMinutes: parseInt(args[4] || "60", 10),
     closureDelayHours: parseFloat(args[5] || "24"),
     accessCode: args[6] || "rally",
+    adminCode: args[7] || "admin-" + Math.random().toString(36).slice(2, 6),
     adminPseudo: "admin",
   };
 }
@@ -34,6 +35,7 @@ if (!config && !RaceHost.restore(SNAP_DIR)) {
     programWindowMinutes: 60,
     closureDelayHours: 24,
     accessCode: "rally",
+    adminCode: "admin-" + Math.random().toString(36).slice(2, 6),
     adminPseudo: "admin",
   };
   console.log("Aucune course existante — course par défaut créée (7 jours, code d'accès : rally)");
@@ -182,7 +184,7 @@ wss.on("connection", (ws) => {
           return;
         }
         const id = "p" + race.players.length + 1;
-        const isAdmin = race.players.length === 0;
+        const isAdmin = msg.code === host.config.adminCode || race.players.length === 0;
         race.addPlayer(id, msg.pseudo, msg.color || "#c33", isAdmin);
         client.playerId = id;
         client.pseudo = msg.pseudo;
@@ -312,6 +314,18 @@ setInterval(() => {
 setInterval(() => broadcastState(), 5000);
 
 server.listen(PORT, () => {
-  console.log(`Voyage Voyage Rally — http://localhost:${PORT}`);
-  console.log(`Course: ${host.config.seedText} — ${host.race.world.totalKm} km, ${host.race.world.stations.length} stations`);
+  console.log("==============================================");
+  console.log("  VOYAGE VOYAGE RALLY — serveur de course");
+  console.log("==============================================");
+  console.log(`  Adresse           : http://localhost:${PORT}`);
+  console.log(`  Course            : ${host.config.seedText} — ${host.race.world.totalKm} km, ${host.race.world.stations.length} stations`);
+  console.log(" ---------------------------------------------");
+  console.log(`  CODE JOUEURS      : ${host.config.accessCode}`);
+  console.log(`  CODE ADMIN        : ${host.config.adminCode}`);
+  console.log(" ---------------------------------------------");
+  console.log("  Donnez le CODE JOUEURS à vos amis.");
+  console.log("  Rejoignez avec le CODE ADMIN pour être");
+  console.log("  administrateur (départ, pause, +1h, +6h).");
+  console.log("  Sinon, le premier inscrit devient admin.");
+  console.log("==============================================");
 });
