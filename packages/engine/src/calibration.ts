@@ -41,6 +41,24 @@ export const FUEL_TERRAIN_FACTOR: Record<string, number> = {
   bourbier: 2.0,
   marécage: 2.4,
 };
+// ---------- Énergie de gravité (pente) ----------
+// slope en ‰ (mètres par km). Physique de l'énergie :
+// - montée : il faut vaincre m·g·h — surconso proportionnelle à la pente ;
+// - descente : le frein moteur fait l'affaire — la conso chute vers le ralenti,
+//   sans jamais atteindre zéro (le moteur tourne toujours).
+// référence : ~2 t, 35 L/100 km de base ≈ 12 kWh d'énergie utile / 100 km.
+// Monter 10 ‰ sur 1 km = 20 000 kg·m·g ≈ 0,054 kWh... la chimie thermique
+// gaspille ~3x : on calibre le facteur sur l'observable Dakar (cols = soif).
+export const GRAVITY_UP_PER_MILLE = 0.028;   // +2.8 % de conso par ‰ de montée
+export const GRAVITY_DOWN_PER_MILLE = 0.022; // -2.2 % de conso par ‰ de descente
+export const IDLE_CONSUMPTION_FLOOR = 0.45;  // plancher : jamais sous 45 % (ralenti + accessoires)
+
+export function slopeConsumptionFactor(slopeMilli: number): number {
+  if (slopeMilli > 0) return 1 + slopeMilli * GRAVITY_UP_PER_MILLE;
+  const down = 1 - (-slopeMilli) * GRAVITY_DOWN_PER_MILLE;
+  return Math.max(IDLE_CONSUMPTION_FLOOR, down);
+}
+
 export const PACE_CONSUMPTION_FACTOR: Record<string, number> = {
   lift_and_coast: 0.65,
   prudente: 0.8,

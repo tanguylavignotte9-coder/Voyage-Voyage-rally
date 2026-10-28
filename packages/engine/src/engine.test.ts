@@ -129,3 +129,42 @@ test("forfait: classement à la distance, spectateur", () => {
   assert.equal(bob.positionKm, 0);
   assert.ok(race.standings()[0].playerId === "a");
 });
+
+test("conso: la descente économise, la montée coûte, avec plancher ralenti", () => {
+  const { slopeConsumptionFactor } = require("./calibration");
+  // plat
+  assert.equal(slopeConsumptionFactor(0), 1);
+  // montée 10 ‰ : +28 %
+  assert.ok(Math.abs(slopeConsumptionFactor(10) - 1.28) < 0.001);
+  // descente 10 ‰ : -22 %
+  assert.ok(Math.abs(slopeConsumptionFactor(-10) - 0.78) < 0.001);
+  // descente extrême : plancher ralenti, jamais zéro
+  assert.equal(slopeConsumptionFactor(-30), 0.45);
+  assert.ok(slopeConsumptionFactor(-100) >= 0.45);
+  // monotonicité
+  assert.ok(slopeConsumptionFactor(5) > slopeConsumptionFactor(0));
+  assert.ok(slopeConsumptionFactor(-5) < slopeConsumptionFactor(0));
+});
+
+test("conso: intégration — une voiture économise réellement en descente", () => {
+  const { Race } = require("./race");
+  const { computeSpeed } = require("./sim");
+  const car = mkCar("normale");
+  const segUp = { km: 0, biome: "montagne", terrain: "piste_moyenne", altitude: 0, slope: 12, width: "moyenne" } as any;
+  const segDown = { km: 0, biome: "montagne", terrain: "piste_moyenne", altitude: 0, slope: -12, width: "moyenne" } as any;
+  const segFlat = { km: 0, biome: "steppe", terrain: "piste_moyenne", altitude: 0, slope: 0, width: "moyenne" } as any;
+  const eff = require("./calibration").settingsEffects(car.settings);
+  const consumption = (seg: any) =>
+    (require("./calibration").FUEL_BASE_L_PER_100KM / 100) *
+    require("./calibration").PACE_CONSUMPTION_FACTOR.normale *
+    (require("./calibration").FUEL_TERRAIN_FACTOR[seg.terrain] ?? 1.3) *
+    require("./calibration").slopeConsumptionFactor(seg.slope) *
+    eff.consumption;
+  const cUp = consumption(segUp);
+  const cDown = consumption(segDown);
+  const cFlat = consumption(segFlat);
+  assert.ok(cUp > cFlat * 1.2, `montée ${cUp.toFixed(2)} > plat ${cFlat.toFixed(2)}`);
+  assert.ok(cDown < cFlat * 0.85, `descente ${cDown.toFixed(2)} < plat ${cFlat.toFixed(2)}`);
+  // et la descente reste plus rapide (le levier d'altitude du §4)
+  assert.ok(computeSpeed(car, segDown, "clair", 0) > computeSpeed(car, segFlat, "clair", 0));
+});
