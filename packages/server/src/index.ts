@@ -32,6 +32,18 @@ if (!config && !RaceHost.restore(SNAP_DIR)) {
 
 let host = RaceHost.restore(SNAP_DIR) || new RaceHost(config!, SNAP_DIR);
 
+// Rattrapage après coupure : le serveur rattrape le temps réel manqué depuis le dernier snapshot
+if (host.race.started && !host.race.paused && host.wallClockSnapshot) {
+  const missedMs = Date.now() - host.wallClockSnapshot;
+  if (missedMs > 60_000) {
+    const steps = Math.min(3600 * 24 * 2, Math.floor(missedMs / 1000));
+    console.log(`Rattrapage accéléré : ${steps} ticks (${(steps / 3600).toFixed(1)} h)…`);
+    host.race.log(`Redémarrage serveur — rattrapage accéléré de ${(steps / 3600).toFixed(1)} h`);
+    for (let i = 0; i < steps; i++) host.race.step();
+    console.log("Rattrapage terminé.");
+  }
+}
+
 const server = http.createServer((req, res) => {
   const publicDir = path.join(__dirname, "..", "public");
   const url = req.url === "/" ? "/index.html" : req.url!;
@@ -81,6 +93,7 @@ function stateMsg(forPlayerId: string | null): any {
     immobilizedReason: c.immobilizedReason,
     stopped: c.stopped,
     sleeping: c.sleeping > 0,
+    stats: host.race.finished ? c.stats : null,
   }));
   const mine = forPlayerId ? cars.find((c) => c.playerId === forPlayerId) : undefined;
   return {

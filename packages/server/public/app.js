@@ -72,6 +72,7 @@
     $("budget").textContent = `\u{1F4B0} ${(car?.budget ?? 0).toFixed(0)}`;
     const pausedEl = $("paused");
     pausedEl.classList.toggle("hidden", !state.paused && state.started);
+    $("btn-results").classList.toggle("hidden", !state.finished);
     updateStandings();
     updateEvents();
     updateChat();
@@ -158,6 +159,16 @@
     assist.textContent = car.allowAssist ? "\u{1F91D} Entraide : OUI" : "\u{1F91D} Entraide : NON";
     assist.onclick = () => send({ type: "allow_assist", value: !car.allowAssist });
     actions.append(assist);
+    if (car.stopped) {
+      const setup = document.createElement("button");
+      setup.textContent = "\u{1F527} R\xE9glages voiture (station)";
+      setup.onclick = () => openSettings(car);
+      actions.append(setup);
+    }
+    const resBtn = document.createElement("button");
+    resBtn.textContent = "\u{1F4CA} D\xE9tail budget";
+    resBtn.onclick = () => openBudget(car);
+    actions.append(resBtn);
     const near = state.cars.filter(
       (c) => c.playerId !== myId && Math.abs(c.positionKm - car.positionKm) < 0.5 && !c.arrived && !c.forfait
     );
@@ -250,45 +261,347 @@
         return a.kind;
     }
   }
+  var BOOL_VARS = ["crevaison", "immobilisation", "nuit", "en_station", "bivouac_en_cours", "meteo_active", "depassement_en_cours"];
+  var NUM_VARS = ["carburant", "fatigue", "organe_critique", "vitesse", "km_parcourus", "distance_prochaine_station", "heure", "jour_de_course", "distance_rival_devant", "distance_rival_derriere"];
+  var CAT_VARS = {
+    biome: ["desert", "montagne", "steppe", "humide"],
+    typologie_terrain: ["piste_rapide", "piste_moyenne", "piste_mauvaise", "dunes", "regs", "pierrier", "col", "bourbier", "mar\xE9cage"]
+  };
+  var NUM_VARS_LABELS = {
+    carburant: "Carburant (% r\xE9servoir)",
+    fatigue: "Fatigue (0-100)",
+    organe_critique: "Organes au seuil critique",
+    vitesse: "Vitesse (km/h)",
+    km_parcourus: "Km parcourus",
+    distance_prochaine_station: "Distance prochaine station (km)",
+    heure: "Heure (0-24)",
+    jour_de_course: "Jour de course",
+    distance_rival_devant: "Distance rival devant (km)",
+    distance_rival_derriere: "Distance rival derri\xE8re (km)"
+  };
+  var BOOL_VARS_LABELS = {
+    crevaison: "Crevaison",
+    immobilisation: "Immobilisation",
+    nuit: "Nuit",
+    en_station: "En station",
+    bivouac_en_cours: "Bivouac en cours",
+    meteo_active: "M\xE9t\xE9o active",
+    depassement_en_cours: "D\xE9passement en cours"
+  };
+  function field(label, input) {
+    const div = document.createElement("label");
+    div.style.display = "flex";
+    div.style.flexDirection = "column";
+    div.style.gap = ".15rem";
+    div.style.fontSize = ".75rem";
+    const s = document.createElement("span");
+    s.textContent = label;
+    div.append(s, input);
+    return div;
+  }
+  function select(options, value, onchange) {
+    const sel = document.createElement("select");
+    for (const o of options) {
+      const opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label;
+      sel.appendChild(opt);
+    }
+    sel.value = value;
+    sel.onchange = () => onchange(sel.value);
+    return sel;
+  }
+  function numberInput(value, onchange) {
+    const inp = document.createElement("input");
+    inp.type = "number";
+    inp.value = String(value);
+    inp.oninput = () => onchange(parseFloat(inp.value) || 0);
+    return inp;
+  }
+  function renderConditionEditor(cond, onChange) {
+    const box = document.createElement("div");
+    box.style.cssText = "display:flex;gap:.3rem;align-items:flex-end;flex-wrap:wrap";
+    const kinds = select(
+      [
+        { value: "bool", label: "Bool\xE9enne" },
+        { value: "numeric", label: "Num\xE9rique" },
+        { value: "categorial", label: "Cat\xE9gorielle" }
+      ],
+      cond.kind,
+      (v) => {
+        if (v === "bool") Object.assign(cond, { kind: "bool", variable: BOOL_VARS[0], value: true });
+        else if (v === "numeric") Object.assign(cond, { kind: "numeric", variable: NUM_VARS[0], operator: "<", value: 20 });
+        else Object.assign(cond, { kind: "categorial", variable: "biome", value: "desert" });
+        onChange();
+      }
+    );
+    box.appendChild(kinds);
+    if (cond.kind === "bool") {
+      box.appendChild(select(BOOL_VARS.map((v) => ({ value: v, label: BOOL_VARS_LABELS[v] ?? v })), cond.variable, (v) => {
+        cond.variable = v;
+        onChange();
+      }));
+      box.appendChild(select([{ value: "true", label: "est vraie" }, { value: "false", label: "est fausse" }], cond.value ? "true" : "false", (v) => {
+        cond.value = v === "true";
+        onChange();
+      }));
+    } else if (cond.kind === "numeric") {
+      box.appendChild(select(NUM_VARS.map((v) => ({ value: v, label: NUM_VARS_LABELS[v] ?? v })), cond.variable, (v) => {
+        cond.variable = v;
+        onChange();
+      }));
+      box.appendChild(select(["<", "<=", ">", ">=", "=="].map((o) => ({ value: o, label: o })), cond.operator, (v) => {
+        cond.operator = v;
+        onChange();
+      }));
+      box.appendChild(numberInput(cond.value, (v) => {
+        cond.value = v;
+        onChange();
+      }));
+    } else {
+      box.appendChild(select(Object.keys(CAT_VARS).map((k) => ({ value: k, label: k === "biome" ? "Biome" : "Typologie de terrain" })), cond.variable, (v) => {
+        cond.variable = v;
+        cond.value = CAT_VARS[v][0];
+        onChange();
+      }));
+      box.appendChild(select(CAT_VARS[cond.variable]?.map((c) => ({ value: c, label: c })) ?? [], cond.value, (v) => {
+        cond.value = v;
+        onChange();
+      }));
+    }
+    return box;
+  }
+  function renderActionEditor(rule, onChange) {
+    const box = document.createElement("div");
+    box.style.cssText = "display:flex;gap:.3rem;align-items:flex-end;flex-wrap:wrap";
+    const actionTypes = [
+      { value: "allure", label: "Changer l'allure" },
+      { value: "risque", label: "Changer le risque" },
+      { value: "ravitaillement", label: "Ravitaillement (prochaine station)" },
+      { value: "reparer_organe", label: "R\xE9parer un organe (station)" },
+      { value: "remplacer_roue", label: "Remplacer une roue" },
+      { value: "dormir", label: "Dormir" },
+      { value: "depassement", label: "Moduler le d\xE9passement" },
+      { value: "defendre_position", label: "D\xE9fendre sa position" },
+      { value: "appeler_camion", label: "Appeler le camion d'assistance" },
+      { value: "arreter_station", label: "S'arr\xEAter \xE0 la prochaine station" },
+      { value: "reprendre_route", label: "Reprendre la route" },
+      { value: "assistance_rival", label: "Assistance \xE0 un rival" },
+      { value: "set_rule", label: "M\xE9ta-action: activer/d\xE9sactiver une r\xE8gle" }
+    ];
+    const ensure = (kind) => {
+      const defaults = {
+        allure: { kind: "allure", level: "normale" },
+        risque: { kind: "risque", level: "normal" },
+        ravitaillement: { kind: "ravitaillement", target: { kind: "percent", percent: 100 } },
+        reparer_organe: { kind: "reparer_organe", organ: "moteur" },
+        remplacer_roue: { kind: "remplacer_roue", where: "station" },
+        dormir: { kind: "dormir", hours: 7, place: "bivouac" },
+        depassement: { kind: "depassement", level: "prudent" },
+        defendre_position: { kind: "defendre_position" },
+        appeler_camion: { kind: "appeler_camion" },
+        arreter_station: { kind: "arreter_station" },
+        reprendre_route: { kind: "reprendre_route" },
+        assistance_rival: { kind: "assistance_rival" },
+        set_rule: { kind: "set_rule", channel: 1, enabled: false }
+      };
+      rule.action = defaults[kind];
+      onChange();
+    };
+    box.appendChild(select(actionTypes, rule.action.kind, ensure));
+    const a = rule.action;
+    if (a.kind === "allure") box.appendChild(select(["lift_and_coast", "prudente", "normale", "soutenue", "attaque"].map((l) => ({ value: l, label: PACE_FR[l] ?? l })), a.level, (v) => {
+      a.level = v;
+      onChange();
+    }));
+    else if (a.kind === "risque") box.appendChild(select(["bas", "normal", "haut"].map((l) => ({ value: l, label: l })), a.level, (v) => {
+      a.level = v;
+      onChange();
+    }));
+    else if (a.kind === "ravitaillement") {
+      box.appendChild(select([{ value: "percent", label: "% du r\xE9servoir" }, { value: "litres", label: "Litres" }], a.target.kind, (v) => {
+        a.target = v === "percent" ? { kind: "percent", percent: 100 } : { kind: "litres", litres: 60 };
+        onChange();
+      }));
+      box.appendChild(numberInput(a.target.kind === "percent" ? a.target.percent : a.target.litres, (v) => {
+        if (a.target.kind === "percent") a.target.percent = v;
+        else a.target.litres = v;
+        onChange();
+      }));
+    } else if (a.kind === "reparer_organe") box.appendChild(select(Object.entries(ORGANS_FR).map(([k, v]) => ({ value: k, label: v })), a.organ, (v) => {
+      a.organ = v;
+      onChange();
+    }));
+    else if (a.kind === "remplacer_roue") box.appendChild(select([{ value: "station", label: "\xE0 la station" }, { value: "bord_piste", label: "au bord de la piste" }], a.where, (v) => {
+      a.where = v;
+      onChange();
+    }));
+    else if (a.kind === "dormir") {
+      box.appendChild(numberInput(a.hours, (v) => {
+        a.hours = v;
+        onChange();
+      }));
+      box.appendChild(select([{ value: "bivouac", label: "bivouac sur place" }, { value: "hotel", label: "h\xF4tel (prochaine station)" }], a.place, (v) => {
+        a.place = v;
+        onChange();
+      }));
+    } else if (a.kind === "depassement") box.appendChild(select(["agressif", "prudent", "interdit"].map((l) => ({ value: l, label: l })), a.level, (v) => {
+      a.level = v;
+      onChange();
+    }));
+    else if (a.kind === "set_rule") {
+      box.appendChild(numberInput(a.channel, (v) => {
+        a.channel = Math.round(v);
+        onChange();
+      }));
+      box.appendChild(select([{ value: "true", label: "activ\xE9e" }, { value: "false", label: "d\xE9sactiv\xE9e" }], a.enabled ? "true" : "false", (v) => {
+        a.enabled = v === "true";
+        onChange();
+      }));
+    }
+    return box;
+  }
   function openPlanner() {
     const car = myCar();
     if (!car) return;
+    if (car.arrived || car.forfait) return;
     const fsEl = $("fullscreen");
     fsEl.style.display = "block";
     const content = $("fscontent");
     content.innerHTML = "";
     const wrap = document.createElement("div");
-    wrap.style.maxHeight = "100%";
-    wrap.style.overflowY = "auto";
+    wrap.style.cssText = "max-height:100%;overflow-y:auto";
     const rules = JSON.parse(JSON.stringify(car.rules));
+    let dirty = false;
     const render2 = () => {
-      wrap.innerHTML = "<h2>Planificateur \u2014 50 canaux</h2>";
-      const table = document.createElement("table");
-      table.innerHTML = "<tr><th>N\xB0</th><th>\xC9tat</th><th>Conditions (ET)</th><th>Action</th><th></th></tr>";
+      wrap.innerHTML = "<h2>Planificateur \u2014 50 canaux, le n\xB0 le plus bas gagne</h2>";
       const sorted = [...rules].sort((a, b) => a.channel - b.channel);
       for (const r of sorted) {
-        const tr = document.createElement("tr");
-        const cond = r.conditions.length === 0 ? "toujours" : r.conditions.map(condText).join(" ET ");
-        tr.innerHTML = `<td>${r.channel}</td><td>${r.enabled ? "ON" : "OFF"}</td><td>${escapeHtml(cond)}</td><td>${escapeHtml(actionText(r.action))}</td>`;
-        const td = document.createElement("td");
+        const card = document.createElement("div");
+        card.className = "rule";
+        card.style.marginBottom = ".5rem";
+        const head = document.createElement("div");
+        head.className = "head";
+        const title = document.createElement("span");
+        title.innerHTML = `N\xB0${r.channel} <span class="${r.enabled ? "on" : "off"}">${r.enabled ? "ON" : "OFF"}</span> \u2014 ${r.mode === "one_shot" ? "one-shot" : "persistante"}`;
+        head.appendChild(title);
+        const chanSel = document.createElement("select");
+        for (let ch = 1; ch <= 50; ch++) {
+          const opt = document.createElement("option");
+          opt.value = String(ch);
+          opt.textContent = `N\xB0${ch}`;
+          chanSel.appendChild(opt);
+        }
+        chanSel.value = String(r.channel);
+        chanSel.onchange = () => {
+          const newCh = parseInt(chanSel.value);
+          if (rules.some((x) => x.channel === newCh)) return;
+          r.channel = newCh;
+          dirty = true;
+          render2();
+        };
         const toggle = document.createElement("button");
-        toggle.textContent = r.enabled ? "D\xE9sactiver" : "Activer";
+        toggle.textContent = r.enabled ? "\u23F8 D\xE9sactiver" : "\u25B6 Activer";
         toggle.onclick = () => {
           r.enabled = !r.enabled;
+          dirty = true;
           render2();
         };
         const del = document.createElement("button");
-        del.textContent = "Supprimer";
+        del.textContent = "\u{1F5D1}";
         del.onclick = () => {
-          const idx = rules.indexOf(r);
-          rules.splice(idx, 1);
+          rules.splice(rules.indexOf(r), 1);
+          dirty = true;
           render2();
         };
-        td.append(toggle, del);
-        tr.appendChild(td);
-        table.appendChild(tr);
+        const controls = document.createElement("span");
+        controls.append(chanSel, toggle, del);
+        head.appendChild(controls);
+        card.appendChild(head);
+        const condHeader = document.createElement("div");
+        condHeader.innerHTML = "<b>Conditions (ET, max 3)</b>";
+        card.appendChild(condHeader);
+        for (const cond of r.conditions) {
+          const row = document.createElement("div");
+          row.style.cssText = "display:flex;align-items:center;gap:.3rem";
+          row.appendChild(renderConditionEditor(cond, () => {
+            dirty = true;
+            renderSummary();
+          }));
+          const rm = document.createElement("button");
+          rm.textContent = "\u2715";
+          rm.className = "small";
+          rm.onclick = () => {
+            r.conditions.splice(r.conditions.indexOf(cond), 1);
+            dirty = true;
+            render2();
+          };
+          row.appendChild(rm);
+          card.appendChild(row);
+        }
+        if (r.conditions.length < 3) {
+          const addCond = document.createElement("button");
+          addCond.textContent = "+ condition";
+          addCond.className = "small";
+          addCond.onclick = () => {
+            r.conditions.push({ kind: "bool", variable: "nuit", value: true });
+            dirty = true;
+            render2();
+          };
+          card.appendChild(addCond);
+        }
+        const actHeader = document.createElement("div");
+        actHeader.innerHTML = "<b>Action</b>";
+        card.append(actHeader);
+        card.appendChild(renderActionEditor(r, () => {
+          dirty = true;
+          render2();
+        }));
+        const effHeader = document.createElement("div");
+        effHeader.innerHTML = "<b>Dur\xE9e d'effet</b>";
+        card.appendChild(effHeader);
+        const effRow = document.createElement("div");
+        effRow.style.cssText = "display:flex;gap:.3rem;align-items:flex-end;flex-wrap:wrap";
+        const effSel = select(
+          [
+            { value: "default", label: "jusqu'\xE0 consigne contraire" },
+            { value: "duration", label: "pendant (heures)" },
+            { value: "distance", label: "pendant (km)" }
+          ],
+          r.effect.kind,
+          (v) => {
+            r.effect = v === "default" ? { kind: "default" } : v === "duration" ? { kind: "duration", hours: 2 } : { kind: "distance", km: 200 };
+            dirty = true;
+            render2();
+          }
+        );
+        effRow.appendChild(effSel);
+        if (r.effect.kind === "duration") effRow.appendChild(numberInput(r.effect.hours, (v) => {
+          r.effect.hours = v;
+          dirty = true;
+          renderSummary();
+        }));
+        if (r.effect.kind === "distance") effRow.appendChild(numberInput(r.effect.km, (v) => {
+          r.effect.km = v;
+          dirty = true;
+          renderSummary();
+        }));
+        card.appendChild(effRow);
+        const modeRow = document.createElement("div");
+        modeRow.style.marginTop = ".3rem";
+        modeRow.appendChild(select(
+          [{ value: "persistante", label: "Persistante (gardien)" }, { value: "one_shot", label: "One-shot (\xE0 r\xE9armer)" }],
+          r.mode,
+          (v) => {
+            r.mode = v;
+            dirty = true;
+            render2();
+          }
+        ));
+        card.appendChild(modeRow);
+        wrap.appendChild(card);
       }
-      wrap.appendChild(table);
+      const bottom = document.createElement("div");
       const addBtn = document.createElement("button");
       addBtn.textContent = "+ Nouvelle r\xE8gle";
       addBtn.onclick = () => {
@@ -304,6 +617,7 @@
           effect: { kind: "default" },
           mode: "persistante"
         });
+        dirty = true;
         render2();
       };
       const saveBtn = document.createElement("button");
@@ -313,7 +627,11 @@
         send({ type: "rules", rules });
         closeFullscreen();
       };
-      wrap.append(addBtn, saveBtn);
+      bottom.append(addBtn, saveBtn);
+      wrap.appendChild(bottom);
+      renderSummary();
+    };
+    const renderSummary = () => {
     };
     render2();
     content.appendChild(wrap);
@@ -326,6 +644,89 @@
   function closeFullscreen() {
     $("fullscreen").style.display = "none";
     $("fscontent").innerHTML = "";
+  }
+  function openSettings(car) {
+    const fsEl = $("fullscreen");
+    fsEl.style.display = "block";
+    const content = $("fscontent");
+    content.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.innerHTML = "<h2>R\xE9glages voiture \u2014 modifiables uniquement \xE0 l'arr\xEAt en station</h2>";
+    const st = car.settings;
+    const sliders = [
+      { key: "tirePressure", label: "Pression des pneus", hint: "haute = vitesse sur piste dure, basse = accroche sable/dunes" },
+      { key: "groundClearance", label: "Garde au sol", hint: "haute = dunes/rochers, basse = stabilit\xE9 et vitesse sur piste" },
+      { key: "engineMap", label: "Cartographie moteur", hint: "puissance vs consommation" }
+    ];
+    for (const sl of sliders) {
+      const row = field(`${sl.label} (0-100) \u2014 ${sl.hint}`, (() => {
+        const inp = document.createElement("input");
+        inp.type = "range";
+        inp.min = "0";
+        inp.max = "100";
+        inp.value = String(st[sl.key]);
+        inp.style.width = "220px";
+        return inp;
+      })());
+      wrap.appendChild(row);
+    }
+    const save = document.createElement("button");
+    save.textContent = "\u{1F4BE} Appliquer";
+    save.style.background = "#7c7";
+    save.onclick = () => {
+      const settings = {};
+      wrap.querySelectorAll("input[type=range]").forEach((inp, i) => {
+        settings[sliders[i].key] = parseInt(inp.value);
+      });
+      send({ type: "settings", settings });
+      closeFullscreen();
+    };
+    wrap.appendChild(save);
+    content.appendChild(wrap);
+  }
+  function openBudget(car) {
+    const fsEl = $("fullscreen");
+    fsEl.style.display = "block";
+    const content = $("fscontent");
+    content.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.innerHTML = `<h2>Portefeuille \u2014 ${car.budget.toFixed(0)}</h2><p>Primes re\xE7ues : ${car.stats.primes.toFixed(0)} \u2014 D\xE9penses : ${car.stats.depenses.toFixed(0)}</p>`;
+    const table = document.createElement("table");
+    table.innerHTML = "<tr><th>Heure</th><th>Op\xE9ration</th><th>Montant</th></tr>";
+    for (const t of [...car.transactions].reverse().slice(0, 30)) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${fmtHour(t.tick)}</td><td>${escapeHtml(t.label)}</td><td style="color:${t.amount >= 0 ? "#7c7" : "#c66"}">${t.amount >= 0 ? "+" : ""}${t.amount.toFixed(0)}</td>`;
+      table.appendChild(tr);
+    }
+    wrap.appendChild(table);
+    const close = document.createElement("button");
+    close.textContent = "Fermer";
+    close.onclick = closeFullscreen;
+    wrap.appendChild(close);
+    content.appendChild(wrap);
+  }
+  function openResults() {
+    if (!state) return;
+    const fsEl = $("fullscreen");
+    fsEl.style.display = "block";
+    const content = $("fscontent");
+    content.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.innerHTML = "<h2>\u{1F3C1} R\xE9sultats de la course</h2>";
+    const table = document.createElement("table");
+    table.innerHTML = "<tr><th>#</th><th>Pilote</th><th>Distance</th><th>V. moy.</th><th>Pannes</th><th>Accidents</th><th>D\xE9passements</th><th>D\xE9penses</th><th>Primes</th></tr>";
+    state.standings.forEach((pid, i) => {
+      const p = state.players.find((x) => x.id === pid);
+      const c = state.cars.find((x) => x.playerId === pid);
+      if (!c) return;
+      const avg = state.tick > 0 ? c.positionKm / (state.tick / 3600) : 0;
+      const st = c.stats;
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${i + 1}</td><td>${escapeHtml(p?.pseudo ?? pid)}${c.arrived ? " \u{1F3C1}" : c.forfait ? " \u274C" : ""}</td><td>${c.positionKm.toFixed(0)} km</td><td>${avg.toFixed(1)} km/h</td><td>${st ? st.pannes : "\u2014"}</td><td>${st ? st.accidents : "\u2014"}</td><td>${st ? st.depassements : "\u2014"}</td><td>${st ? st.depenses.toFixed(0) : "\u2014"}</td><td>${st ? st.primes.toFixed(0) : "\u2014"}</td>`;
+      table.appendChild(tr);
+    });
+    wrap.appendChild(table);
+    content.appendChild(wrap);
   }
   function openMap() {
     if (!state) return;
@@ -487,6 +888,7 @@
     }
   });
   $("btn-map").onclick = openMap;
+  $("btn-results").onclick = openResults;
   $("btn-planner").onclick = openPlanner;
   $("btn-close").onclick = closeFullscreen;
   connect();

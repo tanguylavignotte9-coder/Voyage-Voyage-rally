@@ -173,11 +173,23 @@ export function findContradictions(rules: PlayerRule[]): string[] {
 }
 
 function contradicts(a: RuleAction, b: RuleAction): boolean {
-  if (a.kind !== b.kind) {
-    const meta = (x: RuleAction) => x.kind === "set_rule" ? null : x.kind;
-    return meta(a) !== null && meta(a) === meta(b) && false;
+  if (a.kind !== b.kind) return false;
+  switch (a.kind) {
+    case "allure":
+    case "risque":
+    case "depassement":
+      return (a as any).level !== (b as any).level;
+    case "dormir":
+      return (a as any).hours !== (b as any).hours || (a as any).place !== (b as any).place;
+    case "ravitaillement":
+      return (a as any).target.percent !== (b as any).target.percent || (a as any).target.litres !== (b as any).target.litres;
+    case "remplacer_roue":
+      return (a as any).where !== (b as any).where;
+    case "set_rule":
+      return (a as any).channel === (b as any).channel && (a as any).enabled !== (b as any).enabled;
+    default:
+      return false;
   }
-  return false;
 }
 
 export function tickPlanner(car: CarState, vars: GameVariables): { effects: ActiveEffects; fired: number[] } {

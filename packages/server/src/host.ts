@@ -12,6 +12,7 @@ export class RaceHost {
   config: RaceConfig;
   chat: { tick: number; pseudo: string; text: string }[] = [];
   snapDir: string;
+  wallClockSnapshot: number | null = null;
 
   constructor(config: RaceConfig, snapDir: string) {
     this.config = config;
@@ -21,10 +22,12 @@ export class RaceHost {
   }
 
   snapshot(): void {
+    this.wallClockSnapshot = Date.now();
     const data = JSON.stringify({
       race: this.race,
       chat: this.chat,
       config: this.config,
+      wallClock: this.wallClockSnapshot,
     });
     fs.writeFileSync(path.join(this.snapDir, "snapshot.json"), data);
   }
@@ -36,6 +39,7 @@ export class RaceHost {
     const host = new RaceHost(data.config, snapDir);
     Object.assign(host.race, data.race);
     host.chat = data.chat;
+    host.wallClockSnapshot = data.wallClock ?? null;
     return host;
   }
 }
