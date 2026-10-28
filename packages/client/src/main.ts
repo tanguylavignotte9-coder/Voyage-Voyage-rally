@@ -889,7 +889,7 @@ function altAt(km: number): number {
 }
 
 // ===== Rendu caméra =====
-let camZoom = 1;
+let camZoom = 0.55; // dézoom par défaut: ~73 m visibles
 let lastStateTime = 0;
 let extrapolatedKm = 0;
 let lastKnownKm = 0;
@@ -910,7 +910,7 @@ const WEATHER_ICON: Record<string, string> = {
 };
 
 cv.addEventListener("wheel", (e) => {
-  camZoom = Math.max(0.6, Math.min(1.6, camZoom * (e.deltaY > 0 ? 0.92 : 1.08)));
+  camZoom = Math.max(0.12, Math.min(1.8, camZoom * (e.deltaY > 0 ? 0.9 : 1.11)));
 });
 
 
@@ -1029,17 +1029,26 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
       }
       ctx.stroke();
     }
-    // ligne centrale
+    // LIGNE CENTRALE ancrée au monde: le motif pointillé démarre à des
+    // positions de tracé en MÈTRES ARRONDIS (multiples de 7 m = période du
+    // motif 3+4). La voiture avance, le motif reste fixe sur la route.
     ctx.strokeStyle = "rgba(230,220,190,0.45)";
     ctx.lineWidth = 0.3 * PXM;
-    ctx.setLineDash([3 * PXM, 4 * PXM]);
-    ctx.beginPath();
-    path.forEach((p, i) => {
-      const [sx, sy] = W2S(p.x, p.y);
-      if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
-    });
-    ctx.stroke();
-    ctx.setLineDash([]);
+    const PERIOD_M = 7; // 3 m de trait + 4 m de vide
+    // dessiner chaque trait séparément, positionné en mètres du monde
+    const startM = Math.ceil((km - half) * 1000 / PERIOD_M) * PERIOD_M;
+    for (let m = startM; m <= (km + half) * 1000; m += PERIOD_M) {
+      const k0 = m / 1000;
+      const k1 = (m + 3) / 1000;
+      const pa = pathPoint(k0), pb = pathPoint(k1);
+      if (!pa || !pb) continue;
+      const [sx0, sy0] = W2S(pa.x, pa.y);
+      const [sx1, sy1] = W2S(pb.x, pb.y);
+      ctx.beginPath();
+      ctx.moveTo(sx0, sy0);
+      ctx.lineTo(sx1, sy1);
+      ctx.stroke();
+    }
   }
 
   // ---------- DÉCORS ancrés au monde (hash de position absolue) ----------
