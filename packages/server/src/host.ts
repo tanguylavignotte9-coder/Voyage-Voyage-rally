@@ -1,4 +1,4 @@
-import { Race, RaceParams } from "@vvr/engine";
+import { Race, RaceParams } from "../../engine";
 import * as fs from "fs";
 import * as path from "path";
 

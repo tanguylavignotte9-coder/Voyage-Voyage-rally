@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { RaceHost, RaceConfig } from "./host";
-import { CarState, PlayerRule, TICK_SECONDS, findContradictions, weatherAt } from "@vvr/engine";
+import { CarState, PlayerRule, TICK_SECONDS, findContradictions, weatherAt } from "../../engine";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const SNAP_DIR = process.env.SNAP_DIR || path.join(process.cwd(), "data");
