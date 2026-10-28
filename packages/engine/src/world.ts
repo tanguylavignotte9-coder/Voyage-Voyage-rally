@@ -384,8 +384,15 @@ export class WorldGenerator {
       y += Math.sin(heading) * step;
       km += step / 1000;
 
-      const alt = this.altAt(x, y);
+      // altitude LE LONG DE LA ROUTE: la piste suit le terrain mais une
+      // vraie piste ne dépasse pas ~150‰ (au-delà, elle traverse en lacet).
+      const altRaw = this.altAt(x, y);
       const prev = this.points[this.points.length - 1];
+      let alt = altRaw;
+      if (prev) {
+        const maxRise = 0.15 * step; // 150‰ par pas
+        alt = Math.max(prev.alt - maxRise, Math.min(prev.alt + maxRise, altRaw));
+      }
       const slopePermille = prev ? ((alt - prev.alt) / step) * 1000 : 0;
       this.points.push({
         x, y, km, alt, slopePermille, curvature: curv,
