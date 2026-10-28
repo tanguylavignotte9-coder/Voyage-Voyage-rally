@@ -46,7 +46,7 @@ let host = RaceHost.restore(SNAP_DIR) || new RaceHost(config!, SNAP_DIR);
 
 // Résumé du tracé (1 point / km) précalculé — évite de filtrer 300k points à chaque broadcast
 const pathSummary = host.race.world.points
-  ? host.race.world.points.filter((_: any, i: number) => i % 40 === 0).map((p: any) => ({ x: p.x, y: p.y, km: p.km }))
+  ? host.race.world.points.filter((_: any, i: number) => i % 50 === 0).map((p: any) => ({ x: p.x, y: p.y, km: p.km }))
   : [];
 
 // Rattrapage après coupure : le serveur rattrape le temps réel manqué depuis le dernier snapshot

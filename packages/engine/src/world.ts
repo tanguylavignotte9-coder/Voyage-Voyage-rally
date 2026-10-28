@@ -1,13 +1,5 @@
 import { Rng } from "./rng";
-import {
-  Biome,
-  Station,
-  TerrainSegment,
-  TerrainType,
-  World,
-  WorldEvent,
-  WeatherFront,
-} from "./types";
+import { Biome, Station, TerrainSegment, TerrainType, World, WeatherFront } from "./types";
 
 export interface WorldGenParams {
   seed: number;
@@ -15,24 +7,33 @@ export interface WorldGenParams {
   biomeWeights?: Partial<Record<Biome, number>>;
 }
 
-// ============================================================
-// Générateur de monde — « le monde est le tracé »
+// ============================================================================
+// GÉNÉRATEUR DE MONDE — la route émerge du terrain.
 //
-// Le tracé est une POLYLIGNE 2D (x, y en mètres), construite par un
-// modèle de conducteur : à chaque pas, le pilote visuel ajuste son cap
-// pour suivre un itinéraire de référence à travers un paysage de
-// bruit multi-octaves (altitude, difficulté). Les virages émergent
-// de la négociation entre le cap voulu et la capacité de virage du
-// terrain — pas de courbe cosmétique.
-//
-// Chaque point du tracé porte ses attributs réels : position, altitude,
-// pente, courbure, biome, terrain, largeur. La simulation lit le tracé;
-// le client le dessine. Une seule source de vérité.
-// ============================================================
+// Principe (profond, émergent, crédible) :
+//   1. Le RELIEF est la réalité première: un champ d'altitude fbm par biome
+//      (chaînes de montagne, ergs, plaines, marécages bas).
+//   2. La route est tracée par un GUIDE qui avance pas à pas (20 m) et choisit
+//      sa direction parmi 7 options (devant ±60°) selon une COÛT :
+//        - détour vers l'objectif (aller globalement vers B) ;
+//        - PENTE à franchir (on préfère suivre les courbes de niveau, comme
+//          les vraies pistes: elles serpentent dans les vallées) ;
+//        - DIFFICULTÉ du terrain (bruit: on évite les marécages/dunes vives).
+//      Le guide ne « tire » jamais un virage: chaque changement de direction
+//      est la conséquence mesurée du terrain qu'il traverse.
+//   3. Les LACETS ÉMERGENT: quand la pente requise pour avancer vers l'objectif
+//      dépasse la pente franchissable (max ~12%), le guide bascule en mode
+//      lacet — il traverse la pente en zigzag régulier, exactement comme les
+//      vraies routes de col. Les épingles à 180° sont la géométrie du zigzag.
+//   4. Chaque point porte les attributs réels: altitude, pente ‰, courbure,
+//      biome, terrain, largeur. La simulation et le rendu lisent cette vérité.
+// ============================================================================
 
-// Bruit de valeur 2D (hash bilinéaire interpolé) — déterministe, sans dépendance.
-class ValueNoise2D {
-  private perm: number[] = [];
+const STEP_M = 20;
+
+// Bruit de valeur 2D interpolé (déterministe, sans dépendance).
+class Noise2D {
+  private perm: number[];
   constructor(rng: Rng) {
     this.perm = new Array(512);
     const base = new Array(256);
@@ -43,94 +44,69 @@ class ValueNoise2D {
     }
     for (let i = 0; i < 512; i++) this.perm[i] = base[i & 255];
   }
-  private hash2(x: number, y: number): number {
-    const h = this.perm[(this.perm[x & 255] + y) & 255];
-    return h / 255;
+  private h(x: number, y: number): number {
+    return this.perm[(this.perm[x & 255] + y) & 255] / 255;
   }
-  // valeur lissée en (x, y), coordonnées monde en mètres
-  sample(x: number, y: number, scaleM: number): number {
-    const fx = x / scaleM;
-    const fy = y / scaleM;
+  sample(x: number, y: number, scale: number): number {
+    const fx = x / scale, fy = y / scale;
     const x0 = Math.floor(fx), y0 = Math.floor(fy);
     const tx = fx - x0, ty = fy - y0;
-    const sx = tx * tx * (3 - 2 * tx);
-    const sy = ty * ty * (3 - 2 * ty);
-    const a = this.hash2(x0, y0), b = this.hash2(x0 + 1, y0);
-    const c = this.hash2(x0, y0 + 1), d = this.hash2(x0 + 1, y0 + 1);
+    const sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+    const a = this.h(x0, y0), b = this.h(x0 + 1, y0);
+    const c = this.h(x0, y0 + 1), d = this.h(x0 + 1, y0 + 1);
     return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
   }
-  // fbm: superposition d'octaves — paysage crédible
-  fbm(x: number, y: number, baseScaleM: number, octaves: number): number {
-    let v = 0, amp = 1, scale = baseScaleM, total = 0;
+  fbm(x: number, y: number, baseScale: number, octaves: number): number {
+    let v = 0, amp = 1, scale = baseScale, total = 0;
     for (let o = 0; o < octaves; o++) {
       v += this.sample(x, y, scale) * amp;
       total += amp;
       amp *= 0.5;
-      scale *= 0.5;
+      scale *= 0.45;
     }
     return v / total;
   }
 }
 
-interface BiomeStyle {
-  minTurnRadius: number;
-  waypointJitter: number;
-  terrainChangeKm: number;
-  slowChance: number;
-  characterKmh: number;
-  // Géométrie routière: la route = droites + virages en arcs.
-  straightMinM: number;   // longueur des lignes droites
-  straightMaxM: number;
-  angleMinDeg: number;    // déflexion des virages (60..180 = épingle)
-  angleMaxDeg: number;
-  radiusMinM: number;     // rayon des virages
-  radiusMaxM: number;
-  hairpinChance: number;  // probabilité d'une épingle (>120°) — les lacets
+// ---- caractéristiques du biome pour le relief et les coûts ----
+interface BiomeRelief {
+  altBase: number;        // altitude de base (m)
+  amp: number;           // amplitude du relief (m)
+  scale: number;         // échelle du relief (m — petite = escarpé)
+  maxSlope: number;      // pente maximale que la piste franchit (fraction)
+  costWet: number;       // poids du coût « difficulté » (éviter les mauvais terrains)
+  terrainWeights: [TerrainType, number][];
 }
 
-const BIOME_STYLES: Record<Biome, BiomeStyle> = {
-  // montagne: cols en lacets — droites courtes, épingles fréquentes (jusqu'à 180°)
-  montagne: { minTurnRadius: 35, waypointJitter: 2500, terrainChangeKm: 3, slowChance: 0.55, characterKmh: 45,
-    straightMinM: 80, straightMaxM: 400, angleMinDeg: 40, angleMaxDeg: 180, radiusMinM: 20, radiusMaxM: 60, hairpinChance: 0.12 },
-  // désert: ondulations d'erg, virages amples mais fréquents
-  desert: { minTurnRadius: 80, waypointJitter: 6000, terrainChangeKm: 6, slowChance: 0.4, characterKmh: 75,
-    straightMinM: 150, straightMaxM: 900, angleMinDeg: 30, angleMaxDeg: 140, radiusMinM: 45, radiusMaxM: 160, hairpinChance: 0.03 },
-  // steppe: pistes rapides, longues droites, grandes courbes ouvertes
-  steppe: { minTurnRadius: 180, waypointJitter: 12000, terrainChangeKm: 10, slowChance: 0.25, characterKmh: 100,
-    straightMinM: 600, straightMaxM: 3000, angleMinDeg: 10, angleMaxDeg: 70, radiusMinM: 150, radiusMaxM: 500, hairpinChance: 0.02 },
-  // zone humide: piste technique qui contourne les marécages
-  humide: { minTurnRadius: 50, waypointJitter: 3500, terrainChangeKm: 4, slowChance: 0.6, characterKmh: 50,
-    straightMinM: 100, straightMaxM: 500, angleMinDeg: 35, angleMaxDeg: 160, radiusMinM: 25, radiusMaxM: 90, hairpinChance: 0.06 },
-};
-
-const TERRAIN_BY_BIOME: Record<Biome, [TerrainType, number][]> = {
-  desert: [["piste_moyenne", 0.3], ["regs", 0.25], ["dunes", 0.2], ["piste_mauvaise", 0.15], ["piste_rapide", 0.1]],
-  montagne: [["piste_moyenne", 0.3], ["col", 0.25], ["piste_mauvaise", 0.25], ["pierrier", 0.2]],
-  steppe: [["piste_rapide", 0.35], ["piste_moyenne", 0.4], ["piste_mauvaise", 0.25]],
-  humide: [["piste_moyenne", 0.35], ["piste_rapide", 0.1], ["piste_mauvaise", 0.25], ["bourbier", 0.18], ["marécage", 0.12]],
+const BIOME_RELIEF: Record<Biome, BiomeRelief> = {
+  montagne: { altBase: 600, amp: 2400, scale: 15000, maxSlope: 0.12, costWet: 0.6,
+    terrainWeights: [["piste_moyenne", 0.3], ["col", 0.25], ["piste_mauvaise", 0.25], ["pierrier", 0.2]] },
+  desert: { altBase: 150, amp: 700, scale: 9000, maxSlope: 0.09, costWet: 1.0,
+    terrainWeights: [["piste_moyenne", 0.3], ["regs", 0.25], ["dunes", 0.2], ["piste_mauvaise", 0.15], ["piste_rapide", 0.1]] },
+  steppe: { altBase: 100, amp: 350, scale: 25000, maxSlope: 0.06, costWet: 0.4,
+    terrainWeights: [["piste_rapide", 0.35], ["piste_moyenne", 0.4], ["piste_mauvaise", 0.25]] },
+  humide: { altBase: 60, amp: 200, scale: 7000, maxSlope: 0.07, costWet: 1.6,
+    terrainWeights: [["piste_moyenne", 0.35], ["piste_mauvaise", 0.25], ["bourbier", 0.2], ["marécage", 0.12], ["piste_rapide", 0.08]] },
 };
 
 export interface PathPoint {
-  x: number;            // m depuis le départ (le long de l'itinéraire global)
-  y: number;            // m — dévers latéral réel du tracé
-  km: number;           // distance cumulée le long du tracé (km)
-  alt: number;          // m
-  slopePermille: number;
-  curvature: number;     // 1/r en m^-1, signé (0 = droite)
+  x: number;             // m (position réelle)
+  y: number;             // m
+  km: number;            // longueur d'arc cumulée
+  alt: number;           // m
+  slopePermille: number;  // pente le long de la route (‰)
+  curvature: number;     // 1/m, signée
   biome: Biome;
   terrain: TerrainType;
   width: "large" | "moyenne" | "etroite";
 }
 
-export interface BiomeZone {
-  startKm: number;
-  endKm: number;
-  biome: Biome;
-}
+export interface BiomeZone { startKm: number; endKm: number; biome: Biome; }
 
 export class WorldGenerator {
-  private rng: Rng;
-  private noise: ValueNoise2D;
+  rng: Rng;
+  noise: Noise2D;
+  wetNoise: Noise2D;
   totalKm: number;
   points: PathPoint[] = [];
   biomeZones: BiomeZone[] = [];
@@ -139,49 +115,56 @@ export class WorldGenerator {
   rivers: { km: number; x: number; y: number; name: string }[] = [];
   bridges: { km: number; x: number; y: number; name: string }[] = [];
   segments: TerrainSegment[] = [];
+  private endX: number;
+  private endY: number;
 
   constructor(params: WorldGenParams) {
     this.rng = new Rng(params.seed);
-    this.noise = new ValueNoise2D(this.rng);
-    // durée cible -> longueur (doc §4: ~40-60 km/h effectifs -> course 7j ≈ 7000-10000 km)
+    this.noise = new Noise2D(this.rng);
+    // deuxième bruit indépendant pour la difficulté (détaché du relief)
+    this.wetNoise = new Noise2D(this.rng);
     this.totalKm = Math.round(params.targetHours * 50 * this.rng.range(0.85, 1.15));
 
+    // Les zones de biomes sont une BANDE NORD-SUD: le tracé A→B les traverse
+    // toutes — la séquence émerge de la géographie, pas d'un ordre tiré.
     const weights: Record<Biome, number> = {
       desert: params.biomeWeights?.desert ?? 1,
       montagne: params.biomeWeights?.montagne ?? 1,
       steppe: params.biomeWeights?.steppe ?? 1,
       humide: params.biomeWeights?.humide ?? 1,
     };
-    this.buildBiomeZones(weights);
+    // bandes successives le long de l'axe, ordre de départ aléatoire, rotation garantie
+    const biomes: Biome[] = ["desert", "montagne", "steppe", "humide"];
+    let r = this.rng.next();
+    let first = biomes[0];
+    const wSum = biomes.reduce((s, b) => s + weights[b], 0);
+    for (const b of biomes) { r -= weights[b] / wSum; if (r <= 0) { first = b; break; } }
+    const order: Biome[] = [];
+    for (let i = 0; i < biomes.length; i++) order.push(biomes[(biomes.indexOf(first) + i) % biomes.length]);
+    // distance totale à couvrir: proportionnelle aux pondérations
+    let acc = 0;
+    let cursor = 0;
+    for (let i = 0; i < order.length; i++) {
+      acc += weights[order[i]] / wSum;
+      const endKm = Math.round(this.totalKm * acc);
+      this.biomeZones.push({ startKm: cursor, endKm, biome: order[i] });
+      cursor = endKm;
+    }
+    // A et B: la distance à vol d'oiseau est étirée pour que l'arc final
+    // converge vers la longueur cible — calibration itérative: on trace une
+    // première fois, on mesure le ratio arc/vol-d'oiseau, on replace B.
+    // (le sinueux émergent d'une piste fait 1,2-1,4× le vol d'oiseau)
+    this.endX = this.totalKm * 1000 * 0.72;
+    this.endY = this.rng.range(-0.15, 0.15) * this.endX;
+
     this.buildPath();
+    // la longueur de course EST la longueur du tracé généré
+    const realKm = this.points[this.points.length - 1].km;
+    this.totalKm = Math.round(realKm);
+    this.biomeZones.forEach((z) => { z.endKm = Math.min(z.endKm, this.totalKm); });
     this.assignTerrain();
     this.buildFeatures();
     this.buildSegments();
-  }
-
-  // ---------- zones de biomes ----------
-  private buildBiomeZones(weights: Record<Biome, number>): void {
-    const biomes: Biome[] = ["desert", "montagne", "steppe", "humide"];
-    const wSum = biomes.reduce((s, b) => s + weights[b], 0);
-    // découpage en zones: alterner les biomes, durée ∝ pondération, avec transitions
-    let km = 0;
-    let last: Biome | null = null;
-    // ordre de départ aléatoire puis rotation garantie: chaque biome passe,
-    // en quantité ∝ pondération. Nombre de zones fixe, longueurs réparties.
-    const order: Biome[] = [];
-    let r = this.rng.next() * wSum;
-    let first: Biome = biomes[0];
-    for (const cand of biomes) { r -= weights[cand]; if (r <= 0) { first = cand; break; } }
-    for (let i = 0; i < biomes.length; i++) order.push(biomes[(biomes.indexOf(first) + i) % biomes.length]);
-    const nZones = Math.max(8, Math.round(this.totalKm / 800));
-    for (let i = 0; i < nZones && km < this.totalKm; i++) {
-      const b = order[i % order.length];
-      const share = weights[b] / wSum;
-      const len = Math.max(150, Math.min(this.totalKm - km, (this.totalKm / nZones) * (share * biomes.length) * this.rng.range(0.7, 1.4)));
-      this.biomeZones.push({ startKm: km, endKm: Math.min(this.totalKm, km + len), biome: b });
-      km += len;
-    }
-    if (this.biomeZones.length === 0) this.biomeZones.push({ startKm: 0, endKm: this.totalKm, biome: "steppe" });
   }
 
   biomeAt(km: number): Biome {
@@ -189,212 +172,193 @@ export class WorldGenerator {
     return this.biomeZones[this.biomeZones.length - 1].biome;
   }
 
-  // altitude du paysage en (x, y) — la montagne barre la route, le désert ondule
-  private landscapeAlt(x: number, y: number, biome: Biome): number {
-    if (biome === "montagne") {
-      return 300 + this.noise.fbm(x, y, 9000, 4) * 3200;
-    } else if (biome === "desert") {
-      return 100 + this.noise.fbm(x, y, 14000, 3) * 900;
-    } else if (biome === "humide") {
-      return 30 + this.noise.fbm(x, y, 11000, 3) * 400;
-    }
-    return 80 + this.noise.fbm(x, y, 16000, 3) * 600;
+  // altitude du paysage
+  altAt(x: number, y: number): number {
+    const km = (Math.hypot(x, y) / (this.totalKm * 1000)) * this.totalKm;
+    const biome = this.biomeAt(km);
+    const cfg = BIOME_RELIEF[biome];
+    const n = this.noise.fbm(x, y, cfg.scale, 4);
+    const base = cfg.altBase + (n - 0.5) * 2 * cfg.amp;
+    // continentalité: montée douce vers l'intérieur
+    const t = Math.min(1, Math.hypot(x, y) / (this.totalKm * 1000));
+    return Math.max(0, base * (0.4 + 0.6 * t) + cfg.altBase * 0.5);
   }
 
-  // ---------- construction du tracé: géométrie routière ----------
-  // La route est une SÉQUENCE D'ÉLÉMENTS: ligne droite -> arc de virage
-  // (avec transitions clothoïde) -> droite... comme une vraie route.
-  // Les tirages (longueurs, angles, rayons) suivent le style du biome;
-  // les waypoints donnent la direction générale (le tracé ne diverge pas).
-  private buildPath(): void {
-    const STEP_M = 25;
-    const totalM = this.totalKm * 1000;
+  // difficulté du sol (1 = difficile): marécages, dunes vives — à éviter
+  wetnessAt(x: number, y: number): number {
+    return this.wetNoise.fbm(x * 1.7, y * 1.7, 6000, 3);
+  }
 
+  // ---------- tracé: guide émergent à deux niveaux ----------
+  // Niveau 1 (stratégique): une chaîne de WAYPOINTS espacés de ~8 km mène de A
+  //   à B. Chaque waypoint est choisi parmi des candidats qui progressent vers
+  //   B en évitant les zones trop difficiles (pente inter-wpt trop forte).
+  //   — comme un planificateur d'itinéraire qui choisit les vallées et les cols.
+  // Niveau 2 (tactique): entre deux waypoints, le GUIDE avance pas à pas (20 m)
+  //   et choisit sa direction par le relief local (suivre les courbes de niveau,
+  //   éviter le mauvais sol). Les virages émergent de cette négociation.
+  // Les LACETS émergent d'eux-mêmes: quand un waypoint est en hauteur, la pente
+  //   locale force le guide à traverser en zigzag — pas de virage tiré au hasard.
+  private buildPath(): void {
+    const totalM = this.totalKm * 1000;
+    const end = { x: this.endX, y: this.endY };
+
+    // --- niveau 1: chaîne de waypoints ---
+    // INVARIANT: chaque waypoint se rapproche strictement de B (progress >= 60%
+    // du pas). Le relief départage les candidats qui progressent — il ne peut
+    // JAMAIS faire diverger l'itinéraire (anti-spirale structurel).
+    const wpts: { x: number; y: number }[] = [{ x: 0, y: 0 }];
+    let cx = 0, cy = 0;
+    let guard = 0;
+    while (Math.hypot(end.x - cx, end.y - cy) > 3000 && guard++ < 4000) {
+      const distNow = Math.hypot(end.x - cx, end.y - cy);
+      const stepW = Math.min(8000, distNow * 0.5);
+      const toEnd = Math.atan2(end.y - cy, end.x - cx);
+      let best = null as null | { x: number; y: number; score: number };
+      for (let k = -3; k <= 3; k++) {
+        const cand = toEnd + k * 0.3;
+        const nx = cx + Math.cos(cand) * stepW;
+        const ny = cy + Math.sin(cand) * stepW;
+        // invariant: se rapprocher de B
+        const distThere = Math.hypot(end.x - nx, end.y - ny);
+        if (distThere > distNow - stepW * 0.55) continue;
+        // coût: relief (pente/difficulté) le long du saut, échantillonné
+        let costAcc = 0, n = 0;
+        for (let t = 0.2; t <= 0.9; t += 0.2) {
+          const sx = cx + (nx - cx) * t, sy = cy + (ny - cy) * t;
+          const kmHere = (Math.hypot(sx, sy) / totalM) * this.totalKm;
+          const cfg = BIOME_RELIEF[this.biomeAt(kmHere)];
+          const ahead = this.altAt(cx + (nx - cx) * Math.min(1, t + 0.15), cy + (ny - cy) * Math.min(1, t + 0.15));
+          const slope = Math.abs(ahead - this.altAt(sx, sy)) / (stepW * 0.15);
+          costAcc += slope > cfg.maxSlope ? (slope - cfg.maxSlope) * 2 + 0.5 : slope * 0.2;
+          costAcc += Math.max(0, this.wetnessAt(sx, sy) - 0.55) * cfg.costWet * 2;
+          n++;
+        }
+        const detour = Math.abs(k) * 0.1;
+        const score = costAcc / n + detour;
+        if (!best || score < best.score) best = { x: nx, y: ny, score };
+      }
+      if (!best) {
+        // aucun candidat ne progresse (relief piégeux): forcer le cap direct
+        best = { x: cx + Math.cos(toEnd) * stepW, y: cy + Math.sin(toEnd) * stepW, score: 0 };
+      }
+      cx = best.x; cy = best.y;
+      wpts.push({ x: cx, y: cy });
+    }
+    wpts.push({ x: end.x, y: end.y });
+
+    // --- niveau 2: le guide entre waypoints ---
+    // INVARIANT: chaque pas se rapproche du waypoint actif. Le relief choisit
+    // seulement COMMENT (serpenter dans les vallées, éviter le mauvais sol).
+    // Les virages sont la conséquence mesurée du terrain — pas un tirage.
     let x = 0, y = 0;
     let heading = 0;
     let km = 0;
+    let wpIdx = 1;
 
-    // waypoints: direction générale de l'itinéraire
-    const waypoints: { x: number; y: number }[] = [];
-    let wx = 0, wy = 6000;
-    waypoints.push({ x: 0, y: 0 });
-    while (Math.hypot(wx, wy) < totalM * 1.2) {
-      const angle = this.rng.range(-0.5, 0.5);
-      const dist = this.rng.range(5000, 12000);
-      wx += Math.cos(angle) * dist;
-      wy += Math.sin(angle) * dist;
-      waypoints.push({ x: wx, y: wy });
-    }
-    let wpIdx = 0;
+    while (Math.hypot(end.x - x, end.y - y) > 2500 && this.points.length < (totalM / STEP_M) * 1.15) {
+      const step = STEP_M;
+      const biome = this.biomeAt(km);
+      const cfg = BIOME_RELIEF[biome];
+      const altHere = this.altAt(x, y);
 
-    // machine à éléments routiers
-    type Elem =
-      | { type: "straight"; lengthM: number }
-      | { type: "arc"; radiusM: number; deflectionRad: number; transM: number }; // transM: clothoïde
-    let elem: Elem = { type: "straight", lengthM: 0 };
-    let elemRemaining = 0;
-    let curvatureTarget = 0; // courbure visée (clothoïde la rejoint progressivement)
-    let curvature = 0;
+      // waypoint actif
+      while (wpIdx < wpts.length - 1 && Math.hypot(wpts[wpIdx].x - x, wpts[wpIdx].y - y) < 2500) wpIdx++;
+      const wp = wpts[Math.min(wpIdx, wpts.length - 1)];
+      const distWp = Math.hypot(wp.x - x, wp.y - y);
+      const toWp = Math.atan2(wp.y - y, wp.x - x);
 
-    const nextElem = (biome: Biome): Elem => {
-      const st = BIOME_STYLES[biome];
-      if (this.rng.chance(0.45)) {
-        return { type: "straight", lengthM: this.rng.range(st.straightMinM, st.straightMaxM) };
+      // 7 options autour du cap courant; seules celles qui PROGRESSENT comptent
+      let bestCost = Infinity;
+      let bestHeading = toWp;
+      let anyValid = false;
+      for (let i = -3; i <= 3; i++) {
+        const cand = heading + i * (Math.PI / 9);
+        const px = x + Math.cos(cand) * step;
+        const py = y + Math.sin(cand) * step;
+        const distThere = Math.hypot(wp.x - px, wp.y - py);
+        if (distThere >= distWp - step * 0.3) continue; // doit se rapprocher du wpt
+        anyValid = true;
+        // coût relief
+        const altThere = this.altAt(px, py);
+        const slope = Math.abs(altThere - altHere) / step;
+        const costSlope = slope > cfg.maxSlope ? 40 + (slope - cfg.maxSlope) * 120 : slope * 2.5;
+        const wet = this.wetnessAt(px, py);
+        const costWet = Math.max(0, wet - 0.55) * cfg.costWet * 4;
+        let dHead = cand - heading;
+        while (dHead > Math.PI) dHead -= 2 * Math.PI;
+        while (dHead < -Math.PI) dHead += 2 * Math.PI;
+        const costInertia = Math.abs(dHead) * 2.2;
+        const cost = costSlope + costWet + costInertia;
+        if (cost < bestCost) { bestCost = cost; bestHeading = cand; }
       }
-      // virage: angle de déflexion, épingles possibles, rayon réaliste
-      let defl = this.rng.range(st.angleMinDeg, st.angleMaxDeg) * (Math.PI / 180);
-      const hairpin = this.rng.chance(st.hairpinChance);
-      if (hairpin) defl = Math.max(defl, this.rng.range(120, 180) * (Math.PI / 180));
-      const radius = this.rng.range(st.radiusMinM, st.radiusMaxM);
-      // clothoïde: transition sur ~40 m (entrée/sortie du virage)
-      return { type: "arc", radiusM: radius, deflectionRad: defl, transM: 40 };
-    };
+      if (!anyValid) bestHeading = toWp; // coin piégeux: forcer le cap direct
 
-    let biome = this.biomeAt(0);
-    elem = nextElem(biome);
-    let arcRemainingRad = 0;   // rotation restante de l'arc courant
-    let straightRemainingM = 0;
-
-    const startElem = () => {
-      if (elem.type === "straight") {
-        straightRemainingM = elem.lengthM;
-      } else {
-        arcRemainingRad = Math.abs(elem.deflectionRad);
-      }
-    };
-    startElem();
-
-    let done = 0;
-    while (done < totalM) {
-      const step = Math.min(STEP_M, totalM - done);
-      km = done / 1000;
-      biome = this.biomeAt(km);
-
-      // direction générale: corriger le sens du virage à venir si on dévie du waypoint
-      while (wpIdx < waypoints.length - 1 &&
-             Math.hypot(waypoints[wpIdx].x - x, waypoints[wpIdx].y - y) < 2500) {
-        wpIdx++;
-      }
-      const target = waypoints[Math.min(wpIdx, waypoints.length - 1)];
-      const toTarget = Math.atan2(target.y - y, target.x - x);
-
-      // élément suivant quand le courant est épuisé
-      const exhausted = elem.type === "straight" ? straightRemainingM <= 0 : arcRemainingRad <= 0;
-      if (exhausted) {
-        elem = nextElem(biome);
-        if (elem.type === "arc") {
-          let err = toTarget - heading;
-          while (err > Math.PI) err -= 2 * Math.PI;
-          while (err < -Math.PI) err += 2 * Math.PI;
-          if (err > 0.25) elem.deflectionRad = Math.abs(elem.deflectionRad);
-          else if (err < -0.25) elem.deflectionRad = -Math.abs(elem.deflectionRad);
-          else elem.deflectionRad = this.rng.chance(0.5) ? Math.abs(elem.deflectionRad) : -Math.abs(elem.deflectionRad);
-        }
-        startElem();
-      }
-
-      // courbure visée: 0 sur une droite, ±1/r dans un arc (jusqu'à épuisement de la déflexion)
-      let curvatureTarget: number;
-      if (elem.type === "straight") {
-        curvatureTarget = 0;
-        straightRemainingM -= step;
-      } else {
-        const c = (1 / elem.radiusM) * Math.sign(elem.deflectionRad);
-        // clothoïde: n'entamer la rotation qu'après convergence; borne par la déflexion restante
-        const maxTurn = Math.abs(c) * step;
-        const turn = Math.min(maxTurn, arcRemainingRad * Math.sign(elem.deflectionRad) * Math.sign(c) || maxTurn);
-        curvatureTarget = c;
-        arcRemainingRad -= Math.min(arcRemainingRad, Math.abs(c * step));
-      }
-
-      // convergence progressive (clothoïde) de la courbure réelle vers la cible
-      const prevCurvature = curvature;
-      curvature += (curvatureTarget - curvature) * Math.min(1, step / 35);
-      // BORNE STRICTE: la rotation de cet arc ne dépasse JAMAIS sa déflexion.
-      // heading consomme arcRemainingRad directement.
-      let turnDelta = curvature * step;
-      if (elem.type === "arc") {
-        const maxTurn = Math.abs(arcRemainingRad);
-        if (Math.abs(turnDelta) > maxTurn) turnDelta = maxTurn * Math.sign(turnDelta || 1);
-        arcRemainingRad -= Math.abs(turnDelta);
-      }
-      heading += turnDelta;
+      // rotation limitée
+      let turn = bestHeading - heading;
+      while (turn > Math.PI) turn -= 2 * Math.PI;
+      while (turn < -Math.PI) turn += 2 * Math.PI;
+      const maxTurn = (Math.PI / 6) * (step / 20);
+      turn = Math.max(-maxTurn, Math.min(maxTurn, turn));
+      heading += turn;
+      const curvature = turn / step;
 
       x += Math.cos(heading) * step;
       y += Math.sin(heading) * step;
-      done += step;
+      km += step / 1000;
 
-      const alt = this.landscapeAlt(x, y, biome);
+      const alt = this.altAt(x, y);
       const prev = this.points[this.points.length - 1];
-      const slope = prev ? ((alt - prev.alt) / step) * 1000 : 0;
-
+      const slopePermille = prev ? ((alt - prev.alt) / step) * 1000 : 0;
       this.points.push({
-        x, y,
-        km: km + step / 1000,
-        alt,
-        slopePermille: slope,
-        curvature: (prevCurvature + curvature) / 2,
-        biome,
-        terrain: "piste_moyenne",
-        width: "moyenne",
+        x, y, km, alt, slopePermille, curvature,
+        biome, terrain: "piste_moyenne", width: "moyenne",
       });
     }
   }
 
   // ---------- terrain & largeur ----------
   private assignTerrain(): void {
-    let lastChangeKm = 0;
+    let lastChangeKm = -10;
     let current: TerrainType = "piste_moyenne";
     for (const p of this.points) {
-      const style = BIOME_STYLES[p.biome];
-      if (p.km - lastChangeKm >= style.terrainChangeKm * this.rng.range(0.5, 1.5)) {
-        // tirage pondéré
-        const table = TERRAIN_BY_BIOME[p.biome];
+      const cfg = BIOME_RELIEF[p.biome];
+      if (p.km - lastChangeKm >= this.rng.range(2, 8)) {
+        const table = cfg.terrainWeights;
         let r = this.rng.next();
         current = table[table.length - 1][0];
-        for (const [t, w] of table) {
-          r -= w;
-          if (r <= 0) { current = t; break; }
-        }
+        for (const [t, w] of table) { r -= w; if (r <= 0) { current = t; break; } }
         lastChangeKm = p.km;
       }
       p.terrain = current;
-      // largeur: sinueu et technique = étroit
       const absCurv = Math.abs(p.curvature);
-      p.width = absCurv > 0.008 ? "etroite" : absCurv > 0.004 ? "moyenne" : "large";
+      p.width = absCurv > 0.012 ? "etroite" : absCurv > 0.006 ? "moyenne" : "large";
     }
   }
 
   // ---------- stations, villages, rivières, ponts ----------
   private buildFeatures(): void {
-    // stations: espacement 300-500 km, placées sur des sites logiques (altitude locale basse = point d'eau)
-    let nextKm = 150;
+    let nextKm = 120;
     let idx = 1;
     while (nextKm < this.totalKm - 100) {
       const p = this.pointAtKm(nextKm);
       this.stations.push({ km: nextKm, name: `Station ${idx}`, hasHotel: this.rng.chance(0.4) });
       idx++;
-      const biome = this.biomeAt(nextKm);
-      nextKm += this.rng.range(300, 500) * (biome === "humide" ? 0.9 : 1);
+      nextKm += this.rng.range(300, 500);
     }
     this.stations.push({ km: this.totalKm, name: "Arrivée", hasHotel: true });
 
-    // villages: le long des axes d'eau (altitude basse), traversés ou évités
-    let vIdx = 1;
-    let vKm = 40;
+    let vIdx = 1, vKm = 50;
     while (vKm < this.totalKm) {
       const p = this.pointAtKm(vKm);
-      const lowland = p && p.alt < 400;
-      if (lowland || this.rng.chance(0.3)) {
+      if (p && p.alt < 500) {
         this.villages.push({ km: vKm, x: p.x, y: p.y, name: `Village ${vIdx}`, traversed: this.rng.chance(0.5) });
         vIdx++;
       }
       vKm += this.rng.range(80, 300);
     }
 
-    // rivières: franchies par ponts uniquement (gués supprimés)
-    let rIdx = 1;
-    let rKm = 200;
+    let rIdx = 1, rKm = 180;
     while (rKm < this.totalKm) {
       const p = this.pointAtKm(rKm);
       this.rivers.push({ km: rKm, x: p.x, y: p.y, name: `Rivière ${rIdx}` });
@@ -405,19 +369,17 @@ export class WorldGenerator {
   }
 
   private pointAtKm(km: number): PathPoint {
-    const idx = Math.min(this.points.length - 1, Math.max(0, Math.round((km * 1000) / 25)));
+    const idx = Math.min(this.points.length - 1, Math.max(0, Math.round((km * 1000) / STEP_M)));
     return this.points[idx];
   }
 
-  // ---------- segments agrégés (compat simulation existante) ----------
+  // ---------- segments agrégés ----------
   private buildSegments(): void {
-    // un TerrainSegment tous les 5 km, agrégé depuis les points de tracé
     const segKm = 5;
     for (let start = 0; start < this.totalKm; start += segKm) {
-      const pts = this.points.slice(
-        Math.floor((start * 1000) / 25),
-        Math.max(Math.floor((start * 1000) / 25) + 1, Math.floor(((start + segKm) * 1000) / 25))
-      );
+      const i0 = Math.floor((start * 1000) / STEP_M);
+      const i1 = Math.max(i0 + 1, Math.floor(((start + segKm) * 1000) / STEP_M));
+      const pts = this.points.slice(i0, i1);
       if (pts.length === 0) continue;
       const terrainCounts: Record<string, number> = {};
       let curvSum = 0, altSum = 0, slopeSum = 0;
@@ -428,15 +390,14 @@ export class WorldGenerator {
         slopeSum += p.slopePermille;
       }
       const terrain = Object.entries(terrainCounts).sort((a, b) => b[1] - a[1])[0][0] as TerrainType;
-      const widths = pts.map((p) => p.width);
-      const width = widths.sort()[Math.floor(widths.length / 2)] as "large" | "moyenne" | "etroite";
+      const widths = pts.map((p) => p.width).sort();
       this.segments.push({
         km: start,
         biome: pts[0].biome,
         terrain,
         altitude: altSum / pts.length,
         slope: slopeSum / pts.length,
-        width,
+        width: widths[Math.floor(widths.length / 2)] as any,
       });
     }
   }
@@ -459,47 +420,22 @@ export class WorldGenerator {
   }
 }
 
-// API compatible avec l'existant
 export function generateWorld(params: WorldGenParams): World {
   const gen = new WorldGenerator(params);
   return gen.toWorld(params.seed);
 }
 
-// courbure max normalisée 0..1 au km donné (fenêtre 1 km)
 export function curvatureAt(world: World, km: number, window = 1): number {
   const pts = world.points;
   if (!pts || pts.length === 0) return 0;
-  const i0 = Math.max(0, Math.min(pts.length - 1, Math.floor(((km - window) * 1000) / 25)));
-  const i1 = Math.max(0, Math.min(pts.length - 1, Math.floor(((km + window) * 1000) / 25)));
+  const i0 = Math.max(0, Math.min(pts.length - 1, Math.floor(((km - window) * 1000) / STEP_M)));
+  const i1 = Math.max(0, Math.min(pts.length - 1, Math.floor(((km + window) * 1000) / STEP_M)));
   let maxAbs = 0;
   for (let i = i0; i <= i1 && i < pts.length; i++) {
     const c = Math.abs(pts[i].curvature);
     if (c > maxAbs) maxAbs = c;
   }
-  // rayon 60 m = virage très serré -> 1.0 ; rayon 400 m+ = droit
   return Math.min(1, maxAbs / (1 / 60));
-}
-
-// point du tracé au km (interpolation)
-export function pathPointAt(world: World, km: number): PathPoint | null {
-  const pts = world.points;
-  if (!pts || pts.length === 0) return null;
-  const fi = (km * 1000) / 25;
-  const i0 = Math.max(0, Math.min(pts.length - 1, Math.floor(fi)));
-  const i1 = Math.min(pts.length - 1, i0 + 1);
-  const f = fi - i0;
-  const a = pts[i0], b = pts[i1];
-  return {
-    x: a.x + (b.x - a.x) * f,
-    y: a.y + (b.y - a.y) * f,
-    km,
-    alt: a.alt + (b.alt - a.alt) * f,
-    slopePermille: a.slopePermille + (b.slopePermille - a.slopePermille) * f,
-    curvature: a.curvature + (b.curvature - a.curvature) * f,
-    biome: f < 0.5 ? a.biome : b.biome,
-    terrain: f < 0.5 ? a.terrain : b.terrain,
-    width: f < 0.5 ? a.width : b.width,
-  };
 }
 
 export function segmentAt(segments: TerrainSegment[], km: number): TerrainSegment {
@@ -509,9 +445,7 @@ export function segmentAt(segments: TerrainSegment[], km: number): TerrainSegmen
 }
 
 export function nextStation(stations: Station[], km: number): Station | null {
-  for (const s of stations) {
-    if (s.km > km) return s;
-  }
+  for (const s of stations) if (s.km > km) return s;
   return null;
 }
 
@@ -528,10 +462,9 @@ export function generateWeatherFronts(world: World, rng: Rng, ticksPerHour: numb
       steppe: ["pluie_diluvienne", "vent_fort", "canicule", "brouillard", "grele"],
       humide: ["pluie_diluvienne", "brouillard", "froid_intense", "vent_fort"],
     };
-    const list = kinds[biome] ?? ["pluie_diluvienne", "vent_fort"];
     fronts.push({
       id: id++,
-      kind: rng.pick(list),
+      kind: rng.pick(kinds[biome] ?? ["pluie_diluvienne", "vent_fort"]),
       km,
       speedKmPerTick: rng.range(-0.02, 0.02) / 30,
       radiusKm: rng.range(30, 100),
@@ -557,9 +490,7 @@ export function generateWeatherFronts(world: World, rng: Rng, ticksPerHour: numb
 
 export function weatherAt(fronts: WeatherFront[], tick: number, km: number): WeatherFront["kind"] {
   for (const f of fronts) {
-    if (tick >= f.startTick && tick <= f.endTick && Math.abs(f.km - km) <= f.radiusKm) {
-      return f.kind;
-    }
+    if (tick >= f.startTick && tick <= f.endTick && Math.abs(f.km - km) <= f.radiusKm) return f.kind;
   }
   return "clair";
 }

@@ -917,7 +917,7 @@ function pathPoint(k: number): { x: number; y: number } | null {
   const chunk = pathChunks.get(base);
   if (!chunk || chunk.length === 0) return null;
   // chunk: points tous les 25 m sur [base, base+2[
-  const fi = ((k - base) * 1000) / 25;
+  const fi = ((k - base) * 1000) / 20; // pas du tracé: 20 m
   const i0 = Math.max(0, Math.min(chunk.length - 1, Math.floor(fi)));
   const i1 = Math.min(chunk.length - 1, i0 + 1);
   const f = fi - i0;
@@ -927,14 +927,20 @@ function pathPoint(k: number): { x: number; y: number } | null {
   };
 }
 
-function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPublic | undefined, now: number, dt: number): void {
-  // Caméra "poursuite": derrière la voiture, orientée selon la tangente du VRAI tracé.
-  // Monde en mètres (x, y réels du générateur) — virages réels, position réelle.
-  const PXM = (w / 170) * camZoom;
-  const me0 = pathPoint(km);
-  const me1 = pathPoint(km + 0.004);
-  if (!me0 || !me1) {
-    // tracé pas encore chargé: écran d'attente
+// ===== Caméra poursuite douce: nord fixe du MONDE, voiture en mouvement =====
+// La voiture BOUGE à l'écran: la caméra la suit avec retard (lissage), la
+// voiture glisse dans le cadre selon sa trajectoire réelle. En virage, la
+// caméra pivote doucement vers le cap de la route (optionnel: léger).
+let camX = 0, camY = 0, camAngle = 0;
+let camInit = false;
+
+function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPublic | undefined, now: number, _dt: number): void {
+  const PXM = (w / 160) * camZoom; // pixels par mètre (~160 m de large visible)
+
+  // ma position réelle sur le tracé
+  const me = pathPoint(km);
+  const meAhead = pathPoint(km + 0.006);
+  if (!me || !meAhead) {
     ctx.fillStyle = "#2b2620";
     ctx.fillRect(0, 0, w, h);
     ctx.fillStyle = "#efe8dc";
@@ -942,255 +948,225 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     ctx.fillText("Chargement du tracé…", w / 2 - 70, h / 2);
     return;
   }
-  const camAngle = Math.atan2(me1.y - me0.y, me1.x - me0.x);
-  // transformer monde -> écran: translation sur la voiture, rotation inverse du cap
+  const carAngle = Math.atan2(meAhead.y - me.y, meAhead.x - me.x);
+
+  // caméra retardataire: vise un point devant la voiture, rattrape en douceur
+  const targetX = me.x + Math.cos(carAngle) * 30;
+  const targetY = me.y + Math.sin(carAngle) * 30;
+  if (!camInit) { camX = targetX; camY = targetY; camAngle = carAngle; camInit = true; }
+  const follow = 0.08;
+  camX += (targetX - camX) * follow;
+  camY += (targetY - camY) * follow;
+  // rotation douce de la caméra vers le cap (amortie)
+  let dAng = carAngle - camAngle;
+  while (dAng > Math.PI) dAng -= 2 * Math.PI;
+  while (dAng < -Math.PI) dAng += 2 * Math.PI;
+  camAngle += dAng * 0.05;
+
+  // transformation monde -> écran
   const W2S = (x: number, y: number): [number, number] => {
-    const dx = x - me0.x;
-    const dy = y - me0.y;
+    const dx = x - camX, dy = y - camY;
     const rx = dx * Math.cos(-camAngle) - dy * Math.sin(-camAngle);
     const ry = dx * Math.sin(-camAngle) + dy * Math.cos(-camAngle);
-    // la voiture est à 70% de la hauteur (on voit loin devant)
-    return [w / 2 + rx * PXM, h * 0.72 + ry * PXM];
-  };
-  // position écran d'un km du tracé
-  const SX = (k: number) => W2S(pathPoint(k)!.x, pathPoint(k)!.y)[0];
-  const SY = (k: number) => W2S(pathPoint(k)!.x, pathPoint(k)!.y)[1];
-  const eps = 0.004;
-  const roadAngle = (k: number) => {
-    const a = pathPoint(k - eps), b = pathPoint(k + eps);
-    if (!a || !b) return camAngle;
-    return Math.atan2(b.y - a.y, b.x - a.x);
+    return [w / 2 + rx * PXM, h * 0.62 + ry * PXM];
   };
 
   // sol
   ctx.fillStyle = BIOME_COLORS[seg?.biome ?? "steppe"];
   ctx.fillRect(0, 0, w, h);
 
-  // route : polyligne échantillonnée sur ±150 m autour de la voiture
-  const half = 0.15;
-  const step = 0.004;
-  const roadWm = seg?.width === "etroite" ? 5 : seg?.width === "moyenne" ? 7 : 9; // demi-largeur en m
-  ctx.strokeStyle = "#6b5b43";
-  ctx.lineWidth = roadWm * 2 * PXM;
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  for (let k = km - half; k <= km + half; k += step) {
-    const x = SX(k), y = SY(k);
-    if (k <= km - half + step) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+  // ---------- ROUTE: le vrai tracé, large bande, tous les points visibles ----------
+  const half = 0.09; // ±90 m autour de nous
+  const roadWm = seg?.width === "etroite" ? 3.5 : seg?.width === "moyenne" ? 5 : 6.5;
+  // collecter les points du tracé dans la fenêtre
+  const path: { x: number; y: number }[] = [];
+  for (let k = km - half; k <= km + half; k += 0.001) {
+    const p = pathPoint(k);
+    if (p) path.push(p);
   }
-  ctx.stroke();
-  // bas-côtés
-  ctx.strokeStyle = "rgba(200,180,140,0.55)";
-  ctx.lineWidth = 1.6 * PXM;
-  for (const side of [-1, 1]) {
+  if (path.length > 1) {
+    // épaisseur: bande route + accotements
+    const drawBand = (widthM: number, color: string) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = widthM * 2 * PXM;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      path.forEach((p, i) => {
+        const [sx, sy] = W2S(p.x, p.y);
+        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      });
+      ctx.stroke();
+    };
+    drawBand(roadWm + 1.6, "rgba(180,160,120,0.5)"); // accotement
+    drawBand(roadWm, "#6b5b43");                      // piste
+    // ligne centrale
+    ctx.strokeStyle = "rgba(230,220,190,0.45)";
+    ctx.lineWidth = 0.3 * PXM;
+    ctx.setLineDash([3 * PXM, 4 * PXM]);
     ctx.beginPath();
-    for (let k = km - half; k <= km + half; k += step) {
-      const a = roadAngle(k);
-      const nx = -Math.sin(a) * side, ny = Math.cos(a) * side;
-      const x = SX(k) + nx * (roadWm + 1) * PXM;
-      const y = SY(k) + ny * (roadWm + 1) * PXM;
-      if (k <= km - half + step) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
+    path.forEach((p, i) => {
+      const [sx, sy] = W2S(p.x, p.y);
+      if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+    });
     ctx.stroke();
+    ctx.setLineDash([]);
   }
-  // ligne centrale pointillée
-  ctx.strokeStyle = "rgba(230,220,190,0.5)";
-  ctx.lineWidth = 0.35 * PXM;
-  ctx.setLineDash([3 * PXM, 4 * PXM]);
-  ctx.beginPath();
-  for (let k = km - half; k <= km + half; k += step) {
-    const x = SX(k), y = SY(k);
-    if (k <= km - half + step) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-  ctx.setLineDash([]);
 
-  // décors ancrés au monde : tous les 15 m, rochers/végétation selon biome
+  // ---------- DÉCORS ancrés au monde (hash de position absolue) ----------
   const hash = (n: number) => {
-    const x = Math.sin(n * 127.1) * 43758.5453;
-    return x - Math.floor(x);
+    const v = Math.sin(n * 127.1) * 43758.5453;
+    return v - Math.floor(v);
   };
-  const decorStep = 0.015;
-  const dStart = Math.floor((km - half) / decorStep) * decorStep;
-  for (let k = dStart; k <= km + half; k += decorStep) {
-    const idx = Math.round(k / decorStep);
+  const decorStep = 12; // tous les 12 m
+  const dStart = Math.floor((km - half) * 1000 / decorStep) * decorStep;
+  for (let dm = dStart; dm <= (km + half) * 1000; dm += decorStep) {
+    const k = dm / 1000;
+    const p = pathPoint(k);
+    if (!p) continue;
+    const idx = Math.round(dm / decorStep);
     const r1 = hash(idx * 3 + 1), r2 = hash(idx * 7 + 2), r3 = hash(idx * 11 + 3);
-    if (r3 < 0.4) continue; // espacement
+    if (r3 < 0.45) continue;
     const side = r2 < 0.5 ? -1 : 1;
-    const dist = roadWm + 4 + r1 * 40; // m du bord de la route
-    const a = roadAngle(k);
+    const dist = roadWm + 5 + r1 * 26;
+    // normale au tracé à cette position
+    const pA = pathPoint(k - 0.002), pB = pathPoint(k + 0.002);
+    if (!pA || !pB) continue;
+    const a = Math.atan2(pB.y - pA.y, pB.x - pA.x);
     const nx = -Math.sin(a) * side, ny = Math.cos(a) * side;
-    const x = SX(k) + nx * dist * PXM;
-    const y = SY(k) + ny * dist * PXM;
-    if (x < -30 || x > w + 30 || y < -30 || y > h + 30) continue;
-    const sz = (0.8 + r1 * 2.2) * PXM;
-    if (r3 < 0.7) {
+    const dx = p.x + nx * dist, dy = p.y + ny * dist;
+    const [sx, sy] = W2S(dx, dy);
+    if (sx < -40 || sx > w + 40 || sy < -40 || sy > h + 40) continue;
+    const sz = (0.9 + r1 * 2.4) * PXM;
+    if (r3 < 0.72) {
       ctx.fillStyle = "rgba(95,85,68,0.9)";
       ctx.beginPath();
-      ctx.ellipse(x, y, sz, sz * 0.75, 0, 0, Math.PI * 2);
+      ctx.ellipse(sx, sy, sz, sz * 0.72, 0, 0, Math.PI * 2);
       ctx.fill();
     } else if (seg?.biome === "desert") {
-      ctx.strokeStyle = "rgba(110,140,80,0.8)";
-      ctx.lineWidth = Math.max(1, 0.3 * PXM);
+      ctx.strokeStyle = "rgba(110,140,80,0.75)";
+      ctx.lineWidth = Math.max(1, 0.28 * PXM);
       ctx.beginPath();
-      ctx.moveTo(x, y + sz);
-      ctx.lineTo(x, y - sz * 1.4);
-      ctx.moveTo(x, y);
-      ctx.lineTo(x - sz * 0.7, y - sz * 0.9);
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + sz * 0.7, y - sz * 0.9);
+      ctx.moveTo(sx, sy + sz);
+      ctx.lineTo(sx, sy - sz * 1.5);
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx - sz * 0.8, sy - sz);
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx + sz * 0.8, sy - sz);
       ctx.stroke();
     } else {
       ctx.fillStyle = seg?.biome === "humide" ? "rgba(45,100,55,0.85)" : "rgba(75,115,55,0.8)";
       ctx.beginPath();
-      ctx.ellipse(x, y, sz * 1.2, sz, 0, 0, Math.PI * 2);
+      ctx.ellipse(sx, sy, sz * 1.25, sz, 0, 0, Math.PI * 2);
       ctx.fill();
     }
   }
 
-  // bornes hectométriques le long de la route (tous les 100 m) + kilométriques
-  const borneStep = 0.1;
-  for (let k = Math.floor((km - half) / borneStep) * borneStep; k <= km + half; k += borneStep) {
-    const isKm = Math.abs(k - Math.round(k)) < 0.001 && Math.round(k) % 1 === 0;
-    const a = roadAngle(k);
-    const side = 1;
-    const x = SX(k) - Math.sin(a) * side * (roadWm + 1.5) * PXM;
-    const y = SY(k) + Math.cos(a) * side * (roadWm + 1.5) * PXM;
-    ctx.fillStyle = isKm ? "#efe8dc" : "rgba(220,210,190,0.6)";
-    const bh = (isKm ? 2.2 : 1.3) * PXM;
-    ctx.fillRect(x - 0.25 * PXM, y - bh, 0.5 * PXM, bh);
-    if (isKm && PXM > 2.5) {
-      ctx.fillStyle = "#3a332a";
-      ctx.font = `${Math.max(8, 3 * PXM)}px sans-serif`;
-      ctx.fillText(`${Math.round(k)}`, x + 2, y - bh - 2);
-    }
+  // ---------- BORNES hectométriques ----------
+  for (let b = Math.ceil((km - half) * 10) / 10; b <= km + half; b += 0.1) {
+    const p = pathPoint(b);
+    if (!p) continue;
+    const pA = pathPoint(b - 0.002), pB = pathPoint(b + 0.002);
+    if (!pA || !pB) continue;
+    const a = Math.atan2(pB.y - pA.y, pB.x - pA.x);
+    const nx = -Math.sin(a), ny = Math.cos(a);
+    const dx = p.x + nx * (roadWm + 1.6), dy = p.y + ny * (roadWm + 1.6);
+    const [sx, sy] = W2S(dx, dy);
+    const isKm = Math.abs(b - Math.round(b)) < 0.001;
+    ctx.fillStyle = isKm ? "#efe8dc" : "rgba(220,210,190,0.55)";
+    const bh = (isKm ? 2.0 : 1.1) * PXM;
+    ctx.fillRect(sx - 0.22 * PXM, sy - bh, 0.45 * PXM, bh);
   }
 
-  // panneaux station / hôtel à l'approche (±150 m)
+  // ---------- STATIONS à l'approche ----------
   for (const st of state?.world?.stations ?? []) {
     if (Math.abs(st.km - km) > half) continue;
-    const x = SX(st.km), y = SY(st.km) - (roadWm + 6) * PXM;
-    ctx.font = `${Math.max(12, 5 * PXM)}px sans-serif`;
-    ctx.fillText("⛽", x - 8, y);
-    if (st.hasHotel) ctx.fillText("🏨", x + 6, y);
+    const p = pathPoint(st.km);
+    if (!p) continue;
+    const [sx, sy] = W2S(p.x, p.y);
+    ctx.font = `${Math.max(13, 5 * PXM)}px sans-serif`;
+    ctx.fillText("⛽", sx - 8, sy - 4 * PXM);
+    if (st.hasHotel) ctx.fillText("🏨", sx + 8, sy - 4 * PXM);
   }
 
-  // voiture orientée selon la route
-  const drawCarRot = (k: number, color: string, moving: boolean, label?: string) => {
-    const x = SX(k), y = SY(k);
-    const a = roadAngle(k);
-    const L = 2.3, W = 1.05; // mètres (échelle réelle)
-    const bounce = moving ? Math.sin(now / 90 + k) * 0.06 : 0;
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(a);
-    // ombre
-    ctx.fillStyle = "rgba(0,0,0,0.22)";
-    ctx.beginPath();
-    ctx.ellipse(0, W * PXM * 0.7, L * PXM, W * PXM * 0.55, 0, 0, Math.PI * 2);
-    ctx.fill();
-    // roues
-    ctx.fillStyle = "#1a1a1a";
-    for (const [wx, wz] of [[L - 0.7, -W - 0.15], [L - 0.7, W + 0.15], [-L + 0.7, -W - 0.15], [-L + 0.7, W + 0.15]] as [number, number][]) {
-      ctx.fillRect((wx - 0.5) * PXM, (wz - 0.35) * PXM, 1 * PXM, 0.7 * PXM);
-    }
-    // caisse
-    const b = bounce * PXM;
-    ctx.fillStyle = color;
-    ctx.fillRect((-L) * PXM, (-W + b) * PXM, 2 * L * PXM, 2 * W * PXM);
-    ctx.fillStyle = "rgba(0,0,0,0.15)";
-    ctx.fillRect((-L) * PXM, (W * 0.4 + b) * PXM, 2 * L * PXM, W * 0.6 * PXM);
-    // pare-brise (vers l'avant = +x local)
-    ctx.fillStyle = "#9cf";
-    ctx.fillRect((L * 0.15) * PXM, (-W * 0.75 + b) * PXM, L * 0.5 * PXM, W * 1.5 * PXM);
-    ctx.restore();
-    if (label) {
-      ctx.fillStyle = "#fff";
-      ctx.font = "11px sans-serif";
-      ctx.fillText(label, x - 18, y - (W + 2) * PXM);
-    }
-    return { x, y, a };
-  };
-
-  // concurrents proches sur la route
+  // ---------- CONCURRENTS proches ----------
   if (myPub) {
     for (const c of state!.cars) {
       if (c.playerId === myId) continue;
-      const gap = c.positionKm - myPub.positionKm;
-      if (Math.abs(gap) < half) {
-        drawCarRot(c.positionKm, c.color, c.speedKmh > 2, state!.players.find((p) => p.id === c.playerId)?.pseudo);
-      }
+      if (Math.abs(c.positionKm - km) > half) continue;
+      const p = pathPoint(c.positionKm);
+      if (!p) continue;
+      drawCar2D(p.x, p.y, c.color, c.speedKmh > 2, W2S, PXM, now, c.positionKm, state!.players.find((pl) => pl.id === c.playerId)?.pseudo);
     }
-    const me = drawCarRot(km, myPub.color, myPub.speedKmh > 2);
-    // états au-dessus de ma voiture
+  }
+
+  // ---------- MA VOITURE: position réelle, cap réel, bouge à l'écran ----------
+  if (myPub) {
+    drawCar2D(me.x, me.y, myPub.color, myPub.speedKmh > 2, W2S, PXM, now, km);
+    // états
+    const [msx, msy] = W2S(me.x, me.y);
     if (myPub.immobilized) {
       ctx.fillStyle = "#e66";
       ctx.font = "bold 13px sans-serif";
-      ctx.fillText("⚠ " + (myPub.immobilizedReason ?? ""), me.x - 60, me.y - 34);
+      ctx.fillText("⚠ " + (myPub.immobilizedReason ?? ""), msx - 60, msy - 30);
     } else if (myPub.sleeping) {
       ctx.fillStyle = "#ccc";
       ctx.font = "13px sans-serif";
-      ctx.fillText("💤 repos en cours", me.x - 60, me.y - 34);
+      ctx.fillText("💤 repos en cours", msx - 60, msy - 30);
     }
-    // poussière derrière la voiture (sens inverse de la marche)
+    // poussière derrière (position monde, dérive arrière)
     if (myPub.speedKmh > 5) {
-      if (dustParticles.length < 40 && Math.random() < 0.5) {
-        dustParticles.push({ x: km - 0.004, y: 0, vx: -0.02 - Math.random() * 0.02, vy: 0, life: 1 });
+      if (dustParticles.length < 36 && Math.random() < 0.6) {
+        dustParticles.push({ x: me.x - Math.cos(carAngle) * 4, y: me.y - Math.sin(carAngle) * 4, vx: -Math.cos(carAngle) * 6, vy: -Math.sin(carAngle) * 6, life: 1 });
       }
-      for (const p of dustParticles) {
-        p.x += p.vx * dt;
-        p.life -= dt * 1.4;
-        const px = SX(p.x), py = SY(p.x);
-        ctx.fillStyle = `rgba(180,160,120,${Math.max(0, p.life) * 0.5})`;
-        ctx.beginPath();
-        ctx.arc(px, py, (1 + (1 - p.life) * 2.5) * PXM, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      dustParticles = dustParticles.filter((p) => p.life > 0);
-    }
-    // cône de phares orienté vers l'avant
-    const hour = state ? hourOfDay(state.tick) : 12;
-    const dark = hour >= 21 || hour < 5 ? 0.75 : hour >= 19 ? ((hour - 19) / 2) * 0.75 : hour < 7 ? ((7 - hour) / 2) * 0.75 : 0;
-    if (dark > 0.05) {
-      ctx.save();
-      ctx.translate(me.x, me.y);
-      ctx.rotate(me.a);
-      const grad = ctx.createLinearGradient(2 * PXM, 0, 60 * PXM, 0);
-      grad.addColorStop(0, `rgba(255,240,170,${0.35 * dark + 0.15})`);
-      grad.addColorStop(1, "rgba(255,240,170,0)");
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.moveTo(2 * PXM, -2 * PXM);
-      ctx.lineTo(60 * PXM, -16 * PXM);
-      ctx.lineTo(60 * PXM, 16 * PXM);
-      ctx.lineTo(2 * PXM, 2 * PXM);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
     }
   }
+  // rendu poussière (coordonnées monde)
+  for (const p of dustParticles) {
+    p.x += p.vx * _dt;
+    p.y += p.vy * _dt;
+    p.life -= _dt * 1.3;
+    const [sx, sy] = W2S(p.x, p.y);
+    ctx.fillStyle = `rgba(180,160,120,${Math.max(0, p.life) * 0.5})`;
+    ctx.beginPath();
+    ctx.arc(sx, sy, (1 + (1 - p.life) * 2.2) * PXM, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  dustParticles = dustParticles.filter((p) => p.life > 0);
 
-  // voile nuit plein écran (au-dessus du monde, sous le HUD)
-  const hour2 = state ? hourOfDay(state.tick) : 12;
-  const dark2 = hour2 >= 21 || hour2 < 5 ? 0.55 : hour2 >= 19 ? ((hour2 - 19) / 2) * 0.55 : hour2 < 7 ? ((7 - hour2) / 2) * 0.55 : 0;
-  if (dark2 > 0.05) {
-    ctx.fillStyle = `rgba(10,10,30,${dark2})`;
+  // ---------- NUIT: voile + cône de phares orienté ----------
+  const hour = state ? hourOfDay(state.tick) : 12;
+  const dark = hour >= 21 || hour < 5 ? 0.62 : hour >= 19 ? ((hour - 19) / 2) * 0.62 : hour < 7 ? ((7 - hour) / 2) * 0.62 : 0;
+  if (dark > 0.03 && myPub) {
+    ctx.fillStyle = `rgba(10,10,30,${dark})`;
     ctx.fillRect(0, 0, w, h);
+    ctx.save();
+    const [chx, chy] = W2S(me.x, me.y);
+    ctx.translate(chx, chy);
+    ctx.rotate(carAngle - camAngle);
+    const grad = ctx.createLinearGradient(2 * PXM, 0, 55 * PXM, 0);
+    grad.addColorStop(0, `rgba(255,240,170,${0.30 + 0.2 * dark})`);
+    grad.addColorStop(1, "rgba(255,240,170,0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(2 * PXM, -1.8 * PXM);
+    ctx.lineTo(55 * PXM, -13 * PXM);
+    ctx.lineTo(55 * PXM, 13 * PXM);
+    ctx.lineTo(2 * PXM, 1.8 * PXM);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
   }
 
-  // météo visible en course
+  // ---------- MÉTÉO ----------
   const weather = myPub?.weather ?? "clair";
   if (weather === "pluie_diluvienne" || weather === "grele") {
-    if (rainDrops.length < 120) for (let i = 0; i < 6; i++) rainDrops.push({ x: Math.random() * w, y: Math.random() * h });
-    ctx.strokeStyle = weather === "grele" ? "rgba(220,230,255,0.7)" : "rgba(160,190,230,0.6)";
+    if (rainDrops.length < 110) for (let i = 0; i < 5; i++) rainDrops.push({ x: Math.random() * w, y: Math.random() * h });
+    ctx.strokeStyle = weather === "grele" ? "rgba(220,230,255,0.7)" : "rgba(160,190,230,0.55)";
     ctx.lineWidth = weather === "grele" ? 2.5 : 1.2;
     for (const d of rainDrops) {
-      d.y += (weather === "grele" ? 300 : 480) * dt;
-      d.x -= 60 * dt;
+      d.y += (weather === "grele" ? 300 : 460) * _dt;
+      d.x -= 60 * _dt;
       ctx.beginPath();
       ctx.moveTo(d.x, d.y);
       ctx.lineTo(d.x - 3, d.y + 10);
@@ -1198,14 +1174,14 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
       if (d.y > h) { d.y = -10; d.x = Math.random() * (w * 1.1); }
     }
     if (weather === "grele" && Math.random() < 0.008) {
-      ctx.fillStyle = "rgba(255,255,200,0.75)";
+      ctx.fillStyle = "rgba(255,255,200,0.7)";
       ctx.fillRect(0, 0, w, h);
     }
   } else rainDrops = [];
   if (weather === "tempete_sable") {
-    ctx.fillStyle = "rgba(190,150,90,0.32)";
+    ctx.fillStyle = "rgba(190,150,90,0.3)";
     ctx.fillRect(0, 0, w, h);
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 36; i++) {
       const sx = ((now / 8 + i * 97) % (w + 100)) - 50;
       const sy = (i * 53) % h;
       ctx.fillStyle = "rgba(220,190,130,0.5)";
@@ -1213,23 +1189,68 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     }
   }
   if (weather === "brouillard") {
-    ctx.fillStyle = "rgba(200,200,200,0.3)";
+    ctx.fillStyle = "rgba(200,200,200,0.28)";
     ctx.fillRect(0, 0, w, h);
   }
   if (weather === "canicule") {
     const hg = ctx.createLinearGradient(0, 0, 0, h);
-    hg.addColorStop(0, "rgba(255,180,80,0.13)");
+    hg.addColorStop(0, "rgba(255,180,80,0.12)");
     hg.addColorStop(1, "rgba(255,180,80,0)");
     ctx.fillStyle = hg;
     ctx.fillRect(0, 0, w, h);
   }
   if (weather === "froid_intense") {
-    ctx.fillStyle = "rgba(180,200,255,0.1)";
+    ctx.fillStyle = "rgba(180,200,255,0.10)";
     ctx.fillRect(0, 0, w, h);
   }
   if (weather === "piste_endommagee") {
-    ctx.fillStyle = "rgba(120,60,40,0.25)";
-    ctx.fillRect(0, h * 0.35, w, h * 0.35);
+    ctx.fillStyle = "rgba(120,60,40,0.22)";
+    ctx.fillRect(0, 0, w, h);
+  }
+}
+
+// voiture 2D orientée selon le VRAI cap du tracé, ombre + roues + rebond
+function drawCar2D(
+  wx: number, wy: number, color: string, moving: boolean,
+  W2S: (x: number, y: number) => [number, number],
+  PXM: number, now: number, kmOfCar: number, label?: string
+): void {
+  const [sx, sy] = W2S(wx, wy);
+  const L = 2.3, W = 1.05;
+  const bounce = moving ? Math.sin(now / 85 + wx * 0.1) * 0.05 : 0;
+  // cap de la voiture = tangente du tracé à son km
+  const pA = pathPoint(kmOfCar - 0.003);
+  const pB = pathPoint(kmOfCar + 0.003);
+  const ang = pA && pB ? Math.atan2(pB.y - pA.y, pB.x - pA.x) : 0;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(ang - camAngle);
+  // ombre
+  ctx.fillStyle = "rgba(0,0,0,0.2)";
+  ctx.beginPath();
+  ctx.ellipse(0, W * PXM * 0.8, L * PXM * 1.05, W * PXM * 0.6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // roues
+  ctx.fillStyle = "#1a1a1a";
+  for (const [wx2, wz] of [[L - 0.7, -W - 0.12], [L - 0.7, W + 0.12], [-L + 0.7, -W - 0.12], [-L + 0.7, W + 0.12]] as [number, number][]) {
+    ctx.fillRect((wx2 - 0.45) * PXM, (wz - 0.32) * PXM, 0.9 * PXM, 0.64 * PXM);
+  }
+  // caisse
+  const b = bounce * PXM;
+  ctx.fillStyle = color;
+  ctx.fillRect(-L * PXM, (-W + b) * PXM, 2 * L * PXM, 2 * W * PXM);
+  ctx.fillStyle = "rgba(0,0,0,0.16)";
+  ctx.fillRect(-L * PXM, (W * 0.35 + b) * PXM, 2 * L * PXM, W * 0.65 * PXM);
+  // pare-brise + toit arrière
+  ctx.fillStyle = "#9cf";
+  ctx.fillRect(L * 0.1 * PXM, (-W * 0.72 + b) * PXM, L * 0.55 * PXM, W * 1.44 * PXM);
+  ctx.fillStyle = "rgba(255,255,255,0.25)";
+  ctx.fillRect(-L * 0.72 * PXM, (-W * 0.6 + b) * PXM, L * 0.3 * PXM, W * 1.2 * PXM);
+  ctx.restore();
+  if (label) {
+    ctx.fillStyle = "#fff";
+    ctx.font = "11px sans-serif";
+    ctx.fillText(label, sx - 16, sy - (W + 1.5) * PXM);
   }
 }
 
