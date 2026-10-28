@@ -984,32 +984,39 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     ctx.fillText("Chargement du tracé…", w / 2 - 70, h / 2);
     return;
   }
-  // RACING LINE crédible: la voiture ne reste pas rivée à l'axe de la route.
-  // À l'approche d'un virage elle prend l'EXTÉRIEUR, à l'apex l'INTÉRIEUR,
-  // en sortie elle s'ouvre à nouveau. Le décalage latéral dérive de la
-  // courbure mesurée devant/derrière (lissée en douceur).
+  // RACING LINE CONTINUE: la voiture trace sa trajectoire en lisant la route
+  // sur une fenêtre anticipative (de -100 m derrière à +150 m devant) et en
+  // moyennant la courbure vue. Résultat: elle commence à se placer AVANT le
+  // virage, tient l'apex, s'ouvre en sortie — en MOUVEMENT CONTINU, jamais
+  // en saut binaire.
   const roadWm0 = seg?.width === "etroite" ? 3.5 : seg?.width === "moyenne" ? 5 : 6.5;
-  const lookAhead = pathPoint(km + 0.03);
-  const lookFar = pathPoint(km + 0.09);
-  const curvSign = (() => {
-    // courbure signée: croix (dérivée du cap) entre l'avant-proche et l'avant-loin
-    if (!lookAhead || !lookFar) return 0;
-    const cross = (meAhead.x - meRoad.x) * (lookFar.y - meRoad.y) - (meAhead.y - meRoad.y) * (lookFar.x - meRoad.x);
-    return Math.sign(cross);
-  })();
-  const curvMag = (() => {
-    if (!lookAhead || !lookFar) return 0;
-    const cross = (meAhead.x - meRoad.x) * (lookFar.y - meRoad.y) - (meAhead.y - meRoad.y) * (lookFar.x - meRoad.x);
-    const d1 = Math.hypot(meAhead.x - meRoad.x, meAhead.y - meRoad.y);
-    const d2 = Math.hypot(lookFar.x - meRoad.x, lookFar.y - meRoad.y);
-    if (d1 < 0.01 || d2 < 0.01) return 0;
-    return Math.min(1, Math.abs(cross) / (d1 * d2) * 40); // ~normalisé
-  })();
-  // cible: extérieur à l'entrée (opposé au virage), intérieur à l'apex
-  // (signe du virage), extérieur en sortie — suivi doux.
-  const targetOffset = -curvSign * curvMag * roadWm0 * 0.55 + Math.sin(km * 137.3) * roadWm0 * 0.08;
-  racingOffset += (targetOffset - racingOffset) * 0.06;
-  // position effective: point du tracé + offset latéral (normale locale)
+  // courbure signée lissée sur la fenêtre anticipative
+  let curvWeighted = 0, wSum = 0;
+  for (let dKm = -0.1; dKm <= 0.15; dKm += 0.02) {
+    const pA = pathPoint(km + dKm - 0.004);
+    const pB = pathPoint(km + dKm + 0.004);
+    if (!pA || !pB) continue;
+    // courbure signée locale (produit vectoriel normalisé)
+    const ax = pB.x - pA.x, ay = pB.y - pA.y;
+    const aLen = Math.hypot(ax, ay) || 1;
+    const ahead = dKm > 0;
+    const weight = ahead ? (1 - dKm / 0.15) * 1.4 : 0.6; // on anticipe plus qu'on regarde derrière
+    // direction générale du virage sur cette portion (croix avec la direction globale)
+    const gx = meAhead.x - meRoad.x, gy = meAhead.y - meRoad.y;
+    const cross = (gx * ay - gy * ax) / (aLen * (Math.hypot(gx, gy) || 1));
+    curvWeighted += cross * weight;
+    wSum += weight;
+  }
+  const curvSmooth = wSum > 0 ? curvWeighted / wSum : 0;
+  // cible latérale: extérieur en approche (signe opposé au virage), intérieur
+  // à l'apex (le poids anticipatif domine quand le virage est DEVANT),
+  // extérieur en sortie (le poids rétrospectif tire dans l'autre sens).
+  // + dérive lente naturelle (la voiture ne tient jamais parfaitemen l'axe)
+  const breathe = Math.sin(km * 137.3) * roadWm0 * 0.1;
+  const targetOffset = Math.max(-1, Math.min(1, -curvSmooth * 18)) * roadWm0 * 0.52 + breathe;
+  // lissage temporel doux (2.5%/frame): le déplacement latéral est fluide
+  racingOffset += (targetOffset - racingOffset) * 0.025;
+  // position effective de la voiture: axe du tracé + décalage latéral (normale locale)
   const angRoad = Math.atan2(meAhead.y - meRoad.y, meAhead.x - meRoad.x);
   const me = {
     x: meRoad.x - Math.sin(angRoad) * racingOffset,
@@ -1037,8 +1044,9 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     const dx = x - camX, dy = y - camY;
     const rx = dx * Math.cos(-camAngle) - dy * Math.sin(-camAngle);
     const ry = dx * Math.sin(-camAngle) + dy * Math.cos(-camAngle);
-    // voiture à 30% du bas: on la voit de dos, la route s'étire loin devant
-    return [w / 2 + rx * PXM, h * 0.30 + ry * PXM];
+    // voiture à 30% du BAS (= 70% depuis le haut): on la voit de dos au bas
+    // de l'écran, la route s'étire loin devant vers le haut
+    return [w / 2 + rx * PXM, h * 0.70 + ry * PXM];
   };
 
   // sol

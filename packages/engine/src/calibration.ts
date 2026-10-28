@@ -3,28 +3,28 @@
 
 // ---------- Vitesses de référence (allure soutenue, piste plate, conditions claires) ----------
 // Vitesse de base du véhicule (moteur 100%, carto neutre).
-export const BASE_SPEED_KMH = 90;
+export const BASE_SPEED_KMH = 105;
 
 // Facteurs d'allure (multiplicateurs de vitesse).
 export const PACE_SPEED_FACTOR: Record<string, number> = {
-  lift_and_coast: 0.6, // conduite économe, lever le pied tôt
-  prudente: 0.78,
-  normale: 0.9,
-  soutenue: 1.0,
-  attaque: 1.12, // très exigeant mécaniquement
+  lift_and_coast: 0.55,
+  prudente: 0.6,
+  normale: 0.78,
+  soutenue: 0.92,
+  attaque: 1.05, // très exigeant mécaniquement
 };
 
 // Vitesse de croisière par typologie de terrain (km/h, à soutenue).
 export const TERRAIN_SPEED_KMH: Record<string, number> = {
-  piste_rapide: 130, // liaison rapide, piste roulante
-  piste_moyenne: 95,
-  piste_mauvaise: 70,
-  regs: 85, // plat caillouteux du désert, on peut y aller vite
-  dunes: 55, // franchissement, beaucoup de régime
-  pierrier: 50,
-  col: 45, // montagne, épingles
-  bourbier: 35,
-  marécage: 30,
+  piste_rapide: 175, // liaison rapide: on y tient le 200 en attaque
+  piste_moyenne: 115,
+  piste_mauvaise: 75,
+  regs: 95,
+  dunes: 60,
+  pierrier: 55,
+  col: 50,
+  bourbier: 40,
+  marécage: 35,
 };
 
 // ---------- Carburant ----------
@@ -118,7 +118,7 @@ export const FATIGUE_RECOVERY_BIVOUC_PER_HOUR = 9; // sommeil réparateur, pas c
 export const FATIGUE_RECOVERY_HOTEL_PER_HOUR = 14; // récupération complète
 
 // ---------- Risque ----------
-export const RISK_SPEED_BONUS: Record<string, number> = { bas: 0.95, normal: 1.0, haut: 1.08 };
+export const RISK_SPEED_BONUS: Record<string, number> = { bas: 0.9, normal: 1.0, haut: 1.12 };
 export const RISK_WEAR_FACTOR: Record<string, number> = { bas: 0.6, normal: 1.0, haut: 1.8 };
 export const RISK_CONSUMPTION_FACTOR: Record<string, number> = { bas: 0.9, normal: 1.0, haut: 1.18 };
 export const RISK_ACCIDENT_FACTOR: Record<string, number> = { bas: 0.3, normal: 1.0, haut: 2.6 };
