@@ -939,7 +939,9 @@ let camX = 0, camY = 0, camAngle = 0;
 let camInit = false;
 
 function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPublic | undefined, now: number, _dt: number): void {
-  const PXM = (w / 160) * camZoom; // pixels par mètre (~160 m de large visible)
+  // ÉCHELLE CAMÉRA: ~40 m visibles de large. À 60 km/h le décor défile
+  // à ~500 px/s (sensation de vitesse réelle) et la voiture fait ~140 px.
+  const PXM = (w / 40) * camZoom; // pixels par mètre
 
   // ma position réelle sur le tracé
   const me = pathPoint(km);
@@ -983,7 +985,7 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
   ctx.fillRect(0, 0, w, h);
 
   // ---------- ROUTE: le vrai tracé, large bande, tous les points visibles ----------
-  const half = 0.26; // ±260 m: la route se dessine loin devant/après
+  const half = 0.16; // ±160 m: assez loin devant, détaillé et rapide à l écran
   const roadWm = seg?.width === "etroite" ? 3.5 : seg?.width === "moyenne" ? 5 : 6.5;
   // collecter les points du tracé dans la fenêtre
   const path: { x: number; y: number }[] = [];
@@ -1007,6 +1009,26 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     };
     drawBand(roadWm + 1.6, "rgba(180,160,120,0.5)"); // accotement
     drawBand(roadWm, "#6b5b43");                      // piste
+    // ORNIÈRES: deux traces de roues sombres — lecture immédiate de la vitesse
+    const trackOffset = roadWm * 0.45;
+    for (const side of [-1, 1]) {
+      ctx.strokeStyle = "rgba(40,32,22,0.35)";
+      ctx.lineWidth = 0.55 * PXM;
+      ctx.beginPath();
+      // traces en offset latéral le long du tracé
+      let first = true;
+      for (let k2 = km - half; k2 <= km + half; k2 += 0.002) {
+        const pp = pathPoint(k2);
+        const pa = pathPoint(k2 - 0.002), pb = pathPoint(k2 + 0.002);
+        if (!pp || !pa || !pb) continue;
+        const a = Math.atan2(pb.y - pa.y, pb.x - pa.x);
+        const ox = pp.x - Math.sin(a) * trackOffset * side;
+        const oy = pp.y + Math.cos(a) * trackOffset * side;
+        const [sx, sy] = W2S(ox, oy);
+        if (first) { ctx.moveTo(sx, sy); first = false; } else ctx.lineTo(sx, sy);
+      }
+      ctx.stroke();
+    }
     // ligne centrale
     ctx.strokeStyle = "rgba(230,220,190,0.45)";
     ctx.lineWidth = 0.3 * PXM;
@@ -1070,6 +1092,23 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
       ctx.ellipse(sx, sy, sz * 1.25, sz, 0, 0, Math.PI * 2);
       ctx.fill();
     }
+    }
+  }
+
+  // ---------- PIQUETS de vitesse: tous les 20 m, ils défilent vite ----------
+  for (let dm = Math.floor((km - half) * 50) * 20; dm <= (km + half) * 1000; dm += 20) {
+    const k = dm / 1000;
+    const p = pathPoint(k);
+    if (!p) continue;
+    const pA = pathPoint(k - 0.002), pB = pathPoint(k + 0.002);
+    if (!pA || !pB) continue;
+    const a = Math.atan2(pB.y - pA.y, pB.x - pA.x);
+    for (const side of [-1, 1]) {
+      const dx = p.x - Math.sin(a) * (roadWm + 2.5) * side;
+      const dy = p.y + Math.cos(a) * (roadWm + 2.5) * side;
+      const [sx, sy] = W2S(dx, dy);
+      ctx.fillStyle = side < 0 ? "rgba(240,235,220,0.9)" : "rgba(200,60,40,0.9)";
+      ctx.fillRect(sx - 0.12 * PXM, sy - 1.4 * PXM, 0.25 * PXM, 1.4 * PXM);
     }
   }
 
@@ -1236,10 +1275,10 @@ function drawCar2D(
   ctx.save();
   ctx.translate(sx, sy);
   ctx.rotate(ang - camAngle);
-  // ombre
-  ctx.fillStyle = "rgba(0,0,0,0.2)";
+  // ombre portée (décalée: le soleil vient du haut-gauche)
+  ctx.fillStyle = "rgba(20,14,8,0.35)";
   ctx.beginPath();
-  ctx.ellipse(0, W * PXM * 0.8, L * PXM * 1.05, W * PXM * 0.6, 0, 0, Math.PI * 2);
+  ctx.ellipse(-W * PXM * 0.25, W * PXM * 1.15, L * PXM * 1.02, W * PXM * 0.62, 0, 0, Math.PI * 2);
   ctx.fill();
   // roues
   ctx.fillStyle = "#1a1a1a";
