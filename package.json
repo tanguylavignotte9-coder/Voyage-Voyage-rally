@@ -1,0 +1,21 @@
+{
+  "name": "voyage-voyage-rally",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "npm run build -w packages/engine && npm run build -w packages/server && npm run build:client",
+    "build:client": "esbuild packages/client/src/main.ts --bundle --outfile=packages/server/public/app.js --format=iife --target=es2020",
+    "test": "npm run build && node --test packages/engine/dist/",
+    "start": "npm run build && node packages/server/dist/index.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
