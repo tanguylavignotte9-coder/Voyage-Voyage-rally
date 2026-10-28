@@ -161,7 +161,9 @@ function tickCarInternal(car: CarState, ctx: SimContext, emit: (t: string) => vo
   const vars = buildVariables(car, ctx);
   const { effects } = tickPlanner(car, vars);
 
-  if (effects.pace) car.pace = effects.pace.level;
+  // doc §5: sans règle d'allure active -> allure prudente (le fallback s'applique
+  // à chaque tick, la voiture ne garde jamais une allure orpheline)
+  car.pace = effects.pace ? effects.pace.level : "prudente";
   if (effects.risk) car.risk = effects.risk.level;
   if (effects.overtaking) car.overtaking = effects.overtaking.level;
   car.defending = effects.defending;
