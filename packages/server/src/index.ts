@@ -43,6 +43,11 @@ if (!config && !RaceHost.restore(SNAP_DIR)) {
 
 let host = RaceHost.restore(SNAP_DIR) || new RaceHost(config!, SNAP_DIR);
 
+// Résumé du tracé (1 point / km) précalculé — évite de filtrer 300k points à chaque broadcast
+const pathSummary = host.race.world.points
+  ? host.race.world.points.filter((_: any, i: number) => i % 40 === 0).map((p: any) => ({ x: p.x, y: p.y, km: p.km }))
+  : [];
+
 // Rattrapage après coupure : le serveur rattrape le temps réel manqué depuis le dernier snapshot
 if (host.race.started && !host.race.paused && host.wallClockSnapshot) {
   const missedMs = Date.now() - host.wallClockSnapshot;
@@ -116,7 +121,8 @@ function stateMsg(forPlayerId: string | null): any {
     finished: host.race.finished,
     // Roadbook caché jusqu'à l'ouverture de la fenêtre de programmation (= premier joueur inscrit),
     // puis visible par tous jusqu'à la fin de la course.
-    world: host.race.players.length > 0 ? host.race.world : null,
+    world: host.race.players.length > 0 ? { ...host.race.world, points: undefined, pathZ: undefined } : null,
+    pathSummary,
     fronts: host.race.players.length > 0 ? host.race.fronts.map((f) => ({
       id: f.id, kind: f.kind, km: f.km, radiusKm: f.radiusKm, startTick: f.startTick, endTick: f.endTick,
     })) : [],
@@ -291,6 +297,15 @@ wss.on("connection", (ws) => {
       case "get_state":
         ws.send(JSON.stringify(stateMsg(client.playerId)));
         break;
+      case "get_path_chunk": {
+        // tracé par tronçons de 2 km — le client demande autour de sa position
+        if (!host.race.world.points || host.race.world.points.length === 0) return;
+        const fromKm = Math.max(0, msg.fromKm | 0);
+        const toKm = fromKm + 2;
+        const pts = host.race.world.points.filter((p: any) => p.km >= fromKm && p.km < toKm);
+        ws.send(JSON.stringify({ type: "path_chunk", fromKm, points: pts }));
+        break;
+      }
     }
   });
 

@@ -247,9 +247,12 @@ export interface World {
   totalKm: number;
   stations: Station[];
   segments: TerrainSegment[];
-  villages: { km: number; name: string; traversed: boolean }[];
-  rivers: { km: number; name: string }[];
+  villages: { km: number; x: number; y: number; name: string; traversed: boolean }[];
+  rivers: { km: number; x: number; y: number; name: string }[];
   startName: string;
   endName: string;
   pathZ: number[];
+  points: import("./world").PathPoint[];
+  biomeZones: import("./world").BiomeZone[];
+  bridges: { km: number; x: number; y: number; name: string }[];
 }

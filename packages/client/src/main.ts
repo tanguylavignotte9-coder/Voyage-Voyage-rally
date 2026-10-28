@@ -47,6 +47,8 @@ interface StateMsg {
   paused: boolean;
   finished: boolean;
   world: any;
+  pathSummary: { x: number; y: number; km: number }[];
+  pathChunk: Map<number, any[]>;
   fronts: { id: number; kind: string; km: number; radiusKm: number; startTick: number; endTick: number }[];
   cars: CarPublic[];
   standings: string[];
@@ -91,8 +93,13 @@ function connect(): void {
   ws = new WebSocket(`${proto}://${location.host}`);
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
+    if (msg.type === "path_chunk") {
+      pathChunks.set(msg.fromKm, msg.points);
+      return;
+    }
     if (msg.type === "state") {
       const myOld = state?.cars.find((c) => c.playerId === myId);
+      msg.pathChunk = pathChunks;
       state = msg;
       const myNew = state.cars.find((c) => c.playerId === myId);
       if (myNew) {
@@ -758,12 +765,51 @@ function drawMap(m: CanvasRenderingContext2D, w: number, h: number): void {
     m.fillRect((seg.km / total) * w, h - 24, w / state.world.segments.length + 1, 24);
   });
 
-  m.strokeStyle = "#d9a441";
-  m.lineWidth = 3;
+  // VRAI tracé (vue du dessus) — le tracé 2D réel du monde, échantillonné au km
+  const pts = state.pathSummary ?? [];
+  if (pts.length > 1) {
+    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const span = Math.max(maxX - minX, maxY - minY) * 1.1;
+    const cx0 = (minX + maxX) / 2, cy0 = (minY + maxY) / 2;
+    const mapX = (x: number) => w / 2 + ((x - cx0) / span) * Math.min(w - 60, h * 1.6);
+    const mapY = (y: number) => h * 0.52 + ((y - cy0) / span) * Math.min(w - 60, h * 1.6);
+    m.strokeStyle = "#d9a441";
+    m.lineWidth = 3;
+    m.beginPath();
+    pts.forEach((p, i) => {
+      const x = mapX(p.x), y = mapY(p.y);
+      if (i === 0) m.moveTo(x, y);
+      else m.lineTo(x, y);
+    });
+    m.stroke();
+    // position des voitures sur le VRAI tracé
+    state.cars.forEach((c) => {
+      const nearest = pts.reduce((best: any, p: any) =>
+        Math.abs(p.km - c.positionKm) < Math.abs(best.km - c.positionKm) ? p : best, pts[0]);
+      const x = mapX(nearest.x), y = mapY(nearest.y);
+      m.fillStyle = c.color;
+      m.beginPath();
+      m.arc(x, y, 6, 0, Math.PI * 2);
+      m.fill();
+      const pp = state!.players.find((pp2) => pp2.id === c.playerId);
+      m.fillStyle = "#fff";
+      m.fillText(pp?.pseudo ?? "", x + 8, y + 3);
+    });
+    // départ / arrivée
+    m.fillStyle = "#fff";
+    m.font = "bold 12px sans-serif";
+    m.fillText("A", mapX(pts[0].x) - 4, mapY(pts[0].y) - 10);
+    m.fillText("B", mapX(pts[pts.length - 1].x) - 4, mapY(pts[pts.length - 1].y) - 10);
+  }
+  // profil d'altitude (bande basse)
+  m.strokeStyle = "rgba(217,164,65,0.7)";
+  m.lineWidth = 2;
   m.beginPath();
   state.world.segments.forEach((seg: any, i: number) => {
     const x = (seg.km / total) * w;
-    const y = profileY(seg.altitude);
+    const y = h - 26 - (seg.altitude / 4000) * 20;
     if (i === 0) m.moveTo(x, y);
     else m.lineTo(x, y);
   });
@@ -827,6 +873,7 @@ let lastStateTime = 0;
 let extrapolatedKm = 0;
 let lastKnownKm = 0;
 let lastKnownSpeed = 0;
+const pathChunks = new Map<number, any[]>();
 let lastFrame = 0;
 let dustParticles: { x: number; y: number; vx: number; vy: number; life: number }[] = [];
 let rainDrops: { x: number; y: number }[] = [];
@@ -847,27 +894,57 @@ cv.addEventListener("wheel", (e) => {
 
 
 // ===== Vue 2D de haut — route ancrée au monde, caméra suit la voiture =====
-// Géométrie réelle de l'itinéraire: le tracé pathZ est généré par le moteur de monde
-// et partagé serveur/clients — la vue dessine LE monde, pas une imposture.
-function roadZ(k: number, seed: number): number {
-  const z = state?.world?.pathZ;
-  if (!z || z.length === 0) return 0;
-  const i0 = Math.max(0, Math.min(z.length - 1, Math.floor(k)));
-  const i1 = Math.max(0, Math.min(z.length - 1, i0 + 1));
-  const f = k - i0;
-  return z[i0] * (1 - f) + z[i1] * f; // interpolation linéaire entre km entiers
+// Tracé réel: les chunks de polyligne 2D du monde, demandés au serveur.
+// pathPoint(k) interpole dans les chunks — la vue dessine le VRAI monde.
+function pathPoint(k: number): { x: number; y: number } | null {
+  const base = Math.floor(k / 2) * 2;
+  const chunk = pathChunks.get(base);
+  if (!chunk || chunk.length === 0) return null;
+  // chunk: points tous les 25 m sur [base, base+2[
+  const fi = ((k - base) * 1000) / 25;
+  const i0 = Math.max(0, Math.min(chunk.length - 1, Math.floor(fi)));
+  const i1 = Math.min(chunk.length - 1, i0 + 1);
+  const f = fi - i0;
+  return {
+    x: chunk[i0].x + (chunk[i1].x - chunk[i0].x) * f,
+    y: chunk[i0].y + (chunk[i1].y - chunk[i0].y) * f,
+  };
 }
 
 function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPublic | undefined, now: number, dt: number): void {
-  const seed = state?.world?.seed ?? 1;
-  // échelle : ~170 m visibles de large — à 50 km/h le décor défile à ~75 px/s (fluide)
-  const PXM = (w / 170) * camZoom;          // pixels par mètre
-  const zCar = roadZ(km, seed);
-  const SX = (k: number) => w / 2 + (k - km) * 1000 * PXM;
-  const SY = (k: number) => h * 0.52 - (roadZ(k, seed) - zCar) * PXM;
-  const eps = 0.008;
-  const roadAngle = (k: number) =>
-    Math.atan2(SY(k + eps) - SY(k - eps), SX(k + eps) - SX(k - eps));
+  // Caméra "poursuite": derrière la voiture, orientée selon la tangente du VRAI tracé.
+  // Monde en mètres (x, y réels du générateur) — virages réels, position réelle.
+  const PXM = (w / 170) * camZoom;
+  const me0 = pathPoint(km);
+  const me1 = pathPoint(km + 0.004);
+  if (!me0 || !me1) {
+    // tracé pas encore chargé: écran d'attente
+    ctx.fillStyle = "#2b2620";
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "#efe8dc";
+    ctx.font = "14px sans-serif";
+    ctx.fillText("Chargement du tracé…", w / 2 - 70, h / 2);
+    return;
+  }
+  const camAngle = Math.atan2(me1.y - me0.y, me1.x - me0.x);
+  // transformer monde -> écran: translation sur la voiture, rotation inverse du cap
+  const W2S = (x: number, y: number): [number, number] => {
+    const dx = x - me0.x;
+    const dy = y - me0.y;
+    const rx = dx * Math.cos(-camAngle) - dy * Math.sin(-camAngle);
+    const ry = dx * Math.sin(-camAngle) + dy * Math.cos(-camAngle);
+    // la voiture est à 70% de la hauteur (on voit loin devant)
+    return [w / 2 + rx * PXM, h * 0.72 + ry * PXM];
+  };
+  // position écran d'un km du tracé
+  const SX = (k: number) => W2S(pathPoint(k)!.x, pathPoint(k)!.y)[0];
+  const SY = (k: number) => W2S(pathPoint(k)!.x, pathPoint(k)!.y)[1];
+  const eps = 0.004;
+  const roadAngle = (k: number) => {
+    const a = pathPoint(k - eps), b = pathPoint(k + eps);
+    if (!a || !b) return camAngle;
+    return Math.atan2(b.y - a.y, b.x - a.x);
+  };
 
   // sol
   ctx.fillStyle = BIOME_COLORS[seg?.biome ?? "steppe"];
@@ -1307,6 +1384,16 @@ $("btn-sound").addEventListener("click", () => {
     windGain!.gain.value = 0;
   }
 });
+
+// demande des chunks de tracé autour de la position (fenêtre glissante ±3 km)
+setInterval(() => {
+  if (!state || !myId || lastKnownSpeed <= 0) return;
+  const center = Math.floor(lastKnownKm / 2) * 2;
+  for (let c = center - 4; c <= center + 4; c += 2) {
+    if (c < 0) continue;
+    if (!pathChunks.has(c)) send({ type: "get_path_chunk", fromKm: c });
+  }
+}, 1000);
 
 connect();
 render();
