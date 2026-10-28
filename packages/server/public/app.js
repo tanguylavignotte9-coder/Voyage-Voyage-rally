@@ -791,6 +791,7 @@
     return seg?.altitude ?? 0;
   }
   var camZoom = 1;
+  var viewMode = "flat";
   var lastFrame = 0;
   var dustParticles = [];
   var rainDrops = [];
@@ -817,21 +818,7 @@
   cv.addEventListener("wheel", (e) => {
     camZoom = Math.max(0.6, Math.min(1.6, camZoom * (e.deltaY > 0 ? 0.92 : 1.08)));
   });
-  function render() {
-    requestAnimationFrame(render);
-    const now = performance.now();
-    const dt = Math.min(0.1, (now - lastFrame) / 1e3);
-    lastFrame = now;
-    if (!state) return;
-    const w = cv.width = cv.clientWidth;
-    const h = cv.height = cv.clientHeight;
-    const car = myCar();
-    const myPub = state.cars.find((c) => c.playerId === myId);
-    const km = myPub?.positionKm ?? 0;
-    const seg = state.world.segments[Math.min(state.world.segments.length - 1, Math.floor(km / 25))];
-    const weather = myPub?.weather ?? "clair";
-    const hour = hourOfDay(state.tick);
-    const dark = hour >= 21 || hour < 5 ? 0.75 : hour >= 19 ? (hour - 19) / 2 * 0.75 : hour < 7 ? (7 - hour) / 2 * 0.75 : 0;
+  function drawFlatWorld(w, h, km, seg, myPub, now, _dt) {
     ctx.save();
     ctx.translate(w / 2, h * 0.55);
     ctx.scale(camZoom, camZoom);
@@ -901,7 +888,7 @@
       ctx.fillStyle = "#3a332a";
       ctx.fillText(`${bkm}`, bx - 10, h * 0.7 - 17);
     }
-    for (const st of state.world.stations) {
+    for (const st of state?.world.stations ?? []) {
       const rel = st.km - km;
       if (rel > -0.05 && rel < 0.35) {
         const sx = w / 2 + rel / 0.35 * w * 0.42;
@@ -920,12 +907,12 @@
       ctx.ellipse(x, y + 13, 27, 8, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = "#1a1a1a";
-      for (const wx2 of [x - 27, x - 19, x + 19, x + 27]) {
-        ctx.fillRect(wx2, y - 9 + bounce, 8, 18);
+      for (const wx of [x - 27, x - 19, x + 19, x + 27]) {
+        ctx.fillRect(wx, y - 9 + bounce, 8, 18);
         if (moving) {
           ctx.fillStyle = "#555";
-          const spin = Math.sin(now / 60 + wx2) * 6;
-          ctx.fillRect(wx2, y - 4 + bounce + spin * 0.4, 8, 3);
+          const spin = Math.sin(now / 60 + wx) * 6;
+          ctx.fillRect(wx, y - 4 + bounce + spin * 0.4, 8, 3);
           ctx.fillStyle = "#1a1a1a";
         }
       }
@@ -965,9 +952,9 @@
           dustParticles.push({ x: cx - 30, y: cy + 6, vx: -30 - Math.random() * 40, vy: -10 + Math.random() * 20, life: 1 });
         }
         for (const p of dustParticles) {
-          p.x += p.vx * dt;
-          p.y += p.vy * dt;
-          p.life -= dt * 1.4;
+          p.x += p.vx * _dt;
+          p.y += p.vy * _dt;
+          p.life -= _dt * 1.4;
           ctx.fillStyle = `rgba(180,160,120,${Math.max(0, p.life) * 0.5})`;
           ctx.beginPath();
           ctx.arc(p.x, p.y, 3 + (1 - p.life) * 6, 0, Math.PI * 2);
@@ -976,6 +963,8 @@
         dustParticles = dustParticles.filter((p) => p.life > 0);
       }
     }
+    const hour = state ? hourOfDay(state.tick) : 12;
+    const dark = hour >= 21 || hour < 5 ? 0.75 : hour >= 19 ? (hour - 19) / 2 * 0.75 : hour < 7 ? (7 - hour) / 2 * 0.75 : 0;
     if (dark > 0.05) {
       ctx.fillStyle = `rgba(10,10,30,${dark})`;
       ctx.fillRect(-w, -h, w * 3, h * 3);
@@ -990,13 +979,14 @@
       ctx.closePath();
       ctx.fill();
     }
+    const weather = myPub?.weather ?? "clair";
     if (weather === "pluie_diluvienne" || weather === "grele") {
       if (rainDrops.length < 120) for (let i = 0; i < 6; i++) rainDrops.push({ x: Math.random() * w, y: Math.random() * h });
       ctx.strokeStyle = weather === "grele" ? "rgba(220,230,255,0.7)" : "rgba(160,190,230,0.6)";
       ctx.lineWidth = weather === "grele" ? 2.5 : 1.2;
       for (const d of rainDrops) {
-        d.y += (weather === "grele" ? 300 : 480) * dt;
-        d.x -= 60 * dt;
+        d.y += (weather === "grele" ? 300 : 480) * _dt;
+        d.x -= 60 * _dt;
         ctx.beginPath();
         ctx.moveTo(d.x, d.y);
         ctx.lineTo(d.x - 3, d.y + 10);
@@ -1037,6 +1027,184 @@
       ctx.fillRect(-w, -h, w * 3, h * 3);
     }
     ctx.restore();
+  }
+  function drawIsoWorld(w, h, km, seg, myPub, now, dt, cx, cy) {
+    const S = 5 * camZoom;
+    const ISOX = 0.866, ISOY = 0.5;
+    const proj = (x, z) => [
+      w / 2 + (x - z) * ISOX * S,
+      h * 0.52 + (x + z) * ISOY * S
+    ];
+    const poly = (pts, fill) => {
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+    };
+    const TILE = 16;
+    const baseTx = Math.floor(km * 1e3 / TILE);
+    const biomeBase = BIOME_COLORS[seg?.biome ?? "steppe"];
+    for (let tx = -10; tx <= 14; tx++) {
+      for (let tz = -6; tz <= 6; tz++) {
+        const X = (baseTx + tx) * TILE - km * 1e3;
+        const Z = tz * TILE;
+        const c1 = proj(X, Z), c2 = proj(X + TILE, Z), c3 = proj(X + TILE, Z + TILE), c4 = proj(X, Z + TILE);
+        const alt = ((baseTx + tx + tz) % 2 + 2) % 2;
+        poly([c1, c2, c3, c4], alt ? biomeBase : shade(biomeBase, 1.06));
+      }
+    }
+    const hw = seg?.width === "etroite" ? 4 : seg?.width === "moyenne" ? 5.5 : 7;
+    const roadBase = "#6b5b43";
+    for (let x = -90; x < 190; x += 8) {
+      poly([proj(x, -hw), proj(x + 8, -hw), proj(x + 8, hw), proj(x, hw)], x / 8 % 2 === 0 ? roadBase : shade(roadBase, 1.08));
+    }
+    for (let x = -90; x < 190; x += 12) {
+      poly([proj(x, -0.3), proj(x + 4, -0.3), proj(x + 4, 0.3), proj(x, 0.3)], "rgba(230,220,190,0.5)");
+    }
+    poly([proj(-90, -hw - 1.2), proj(190, -hw - 1.2), proj(190, -hw), proj(-90, -hw)], "rgba(200,180,140,0.5)");
+    poly([proj(-90, hw), proj(190, hw), proj(190, hw + 1.2), proj(-90, hw + 1.2)], "rgba(200,180,140,0.5)");
+    const ents = [];
+    const hash = (n) => {
+      const x = Math.sin(n * 127.1) * 43758.5453;
+      return x - Math.floor(x);
+    };
+    for (let t = -6; t <= 12; t++) {
+      const txm = (baseTx + t) * TILE;
+      for (let j = 0; j < 3; j++) {
+        const r1 = hash(txm * 3 + j), r2 = hash(txm * 7 + j * 13), r3 = hash(txm * 11 + j * 29);
+        if (r3 < 0.35) continue;
+        const X = txm - km * 1e3 + r1 * TILE;
+        const side = r2 < 0.5 ? -1 : 1;
+        const Z = side * (hw + 3 + r2 * 22);
+        const depth = X + Z;
+        const px = proj(X, Z);
+        if (r3 < 0.65) {
+          const rr = 1.2 + r1 * 1.6;
+          const topY = px[1] - rr * 2 * S * 0.5;
+          ents.push({
+            depth,
+            draw: () => {
+              poly([proj(X - rr, Z), proj(X + rr * 0.4, Z + rr * 0.8), proj(X + rr, Z), proj(X, Z - rr * 0.8)], "rgba(105,95,80,0.9)");
+              poly([[px[0] - rr * ISOX * S, topY], [px[0], topY - rr * ISOY * S * 0.6], [px[0] + rr * ISOX * S, topY], [px[0], topY + rr * ISOY * S * 0.6]], "rgba(140,128,108,0.95)");
+            }
+          });
+        } else if (seg?.biome === "steppe" || seg?.biome === "humide") {
+          ents.push({
+            depth,
+            draw: () => {
+              ctx.strokeStyle = "rgba(90,70,45,0.8)";
+              ctx.beginPath();
+              ctx.moveTo(px[0], px[1]);
+              ctx.lineTo(px[0], px[1] - 6 * S * 0.4);
+              ctx.stroke();
+              poly([[px[0] - 3 * S * 0.5, px[1] - 4 * S * 0.4], [px[0], px[1] - 8 * S * 0.5], [px[0] + 3 * S * 0.5, px[1] - 4 * S * 0.4], [px[0], px[1] - 1 * S * 0.4]], seg?.biome === "humide" ? "rgba(50,105,60,0.9)" : "rgba(80,125,55,0.85)");
+            }
+          });
+        }
+      }
+    }
+    const drawIsoCar = (xOff, color, moving, label) => {
+      const L = 2.3, W = 1.05, H = 1.5;
+      const bounce = moving ? Math.sin(now / 90 + xOff) * 0.06 : 0;
+      const x0 = xOff;
+      const up = (p, hh) => [p[0], p[1] - hh * S];
+      const cFL = proj(x0 + L, -W), cFR = proj(x0 + L, W), cBL = proj(x0 - L, -W), cBR = proj(x0 - L, W);
+      const b = bounce * 2;
+      ctx.fillStyle = "#1a1a1a";
+      for (const [wx, wz] of [[L - 0.7, -W - 0.15], [L - 0.7, W + 0.15], [-L + 0.7, -W - 0.15], [-L + 0.7, W + 0.15]]) {
+        const p = proj(x0 + wx, wz);
+        ctx.beginPath();
+        ctx.ellipse(p[0], p[1], 0.5 * S, 0.35 * S, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      poly([cFL, cFR, up(cFR, H), up(cFL, H)], shade(color, 0.72));
+      poly([cFR, cBR, up(cBR, H), up(cFR, H)], shade(color, 0.55));
+      poly([up(cFL, H + b), up(cFR, H + b), up(cBR, H + b), up(cBL, H + b)], color);
+      const wFL = up(proj(x0 + L * 0.55, -W * 0.8), H + b), wFR = up(proj(x0 + L * 0.55, W * 0.8), H + b);
+      const wBL = up(proj(x0 - L * 0.1, -W * 0.8), H + b), wBR = up(proj(x0 - L * 0.1, W * 0.8), H + b);
+      poly([wFL, wFR, wBR, wBL], "rgba(150,200,235,0.9)");
+      if (label) {
+        const lp = up(cBL, H + 0.8);
+        ctx.fillStyle = "#fff";
+        ctx.font = "11px sans-serif";
+        ctx.fillText(label, lp[0] - 18, lp[1]);
+      }
+      return { cFL, cFR };
+    };
+    if (myPub) {
+      for (const c of state.cars) {
+        if (c.playerId === myId) continue;
+        const gapM = (c.positionKm - myPub.positionKm) * 1e3;
+        if (Math.abs(gapM) < 220) {
+          ents.push({ depth: gapM + 0, draw: () => drawIsoCar(gapM, c.color, c.speedKmh > 2, state.players.find((p) => p.id === c.playerId)?.pseudo) });
+        }
+      }
+      ents.push({ depth: 0, draw: () => {
+        drawIsoCar(0, myPub.color, myPub.speedKmh > 2);
+        if (myPub.immobilized) {
+          const p = proj(0, -3);
+          ctx.fillStyle = "#e66";
+          ctx.font = "bold 12px sans-serif";
+          ctx.fillText("\u26A0 " + (myPub.immobilizedReason ?? ""), p[0] - 60, p[1] - 30);
+        }
+        if (myPub.speedKmh > 5) {
+          if (dustParticles.length < 40 && Math.random() < 0.5) {
+            dustParticles.push({ x: -3, y: 0.8, vx: -6, vy: 0, life: 1 });
+          }
+        }
+      } });
+    }
+    ents.sort((a, b) => a.depth - b.depth);
+    for (const e of ents) e.draw();
+    for (const p of dustParticles) {
+      p.x += p.vx * dt;
+      p.y += (0.4 + p.y * 0.2) * dt * 2;
+      p.life -= dt * 1.4;
+      const pp = proj(p.x, p.y);
+      ctx.fillStyle = `rgba(180,160,120,${Math.max(0, p.life) * 0.5})`;
+      ctx.beginPath();
+      ctx.arc(pp[0], pp[1] - (1 - p.life) * 4, (3 + (1 - p.life) * 5) * camZoom, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    dustParticles = dustParticles.filter((p) => p.life > 0);
+    const hour = state ? hourOfDay(state.tick) : 12;
+    const dark = hour >= 21 || hour < 5 ? 0.75 : hour >= 19 ? (hour - 19) / 2 * 0.75 : hour < 7 ? (7 - hour) / 2 * 0.75 : 0;
+    if (dark > 0.05 && myPub) {
+      const f1 = proj(2.6, -0.9), f2 = proj(2.6, 0.9);
+      const e1 = proj(45, -7), e2 = proj(45, 7);
+      poly([f1, e1, e2, f2], `rgba(255,240,170,${0.18 + 0.15 * dark})`);
+    }
+  }
+  function shade(hex, f) {
+    const n = parseInt(hex.slice(1), 16);
+    const r = Math.min(255, Math.round((n >> 16 & 255) * f));
+    const g = Math.min(255, Math.round((n >> 8 & 255) * f));
+    const b = Math.min(255, Math.round((n & 255) * f));
+    return `rgb(${r},${g},${b})`;
+  }
+  function render() {
+    requestAnimationFrame(render);
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - lastFrame) / 1e3);
+    lastFrame = now;
+    if (!state) return;
+    const w = cv.width = cv.clientWidth;
+    const h = cv.height = cv.clientHeight;
+    const car = myCar();
+    const myPub = state.cars.find((c) => c.playerId === myId);
+    const km = myPub?.positionKm ?? 0;
+    const seg = state.world.segments[Math.min(state.world.segments.length - 1, Math.floor(km / 25))];
+    const weather = myPub?.weather ?? "clair";
+    const hour = hourOfDay(state.tick);
+    const dark = hour >= 21 || hour < 5 ? 0.75 : hour >= 19 ? (hour - 19) / 2 * 0.75 : hour < 7 ? (7 - hour) / 2 * 0.75 : 0;
+    const cx = w / 2, cy = h * 0.7;
+    if (viewMode === "iso") {
+      drawIsoWorld(w, h, km, seg, myPub, now, dt, cx, cy);
+    } else {
+      drawFlatWorld(w, h, km, seg, myPub, now, dt);
+    }
     ctx.fillStyle = "rgba(30,26,20,0.75)";
     ctx.fillRect(0, h - 30, w, 30);
     ctx.fillStyle = "#efe8dc";
@@ -1087,6 +1255,10 @@
         input.value = "";
       }
     }
+  });
+  $("btn-view").addEventListener("click", () => {
+    viewMode = viewMode === "iso" ? "flat" : "iso";
+    $("btn-view").textContent = viewMode === "iso" ? "\u{1F7E6} Vue 2D" : "\u{1F48E} Vue 3/4 iso";
   });
   $("btn-map").onclick = openMap;
   $("btn-results").onclick = openResults;
