@@ -2,10 +2,14 @@
   "name": "voyage-voyage-rally",
   "private": true,
   "version": "0.1.0",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "build": "npm run build -w packages/engine && npm run build -w packages/server && npm run build:client",
-    "build:client": "esbuild packages/client/src/main.ts --bundle --outfile=packages/server/public/app.js --format=iife --target=es2020",
+    "build": "npm run build:engine && npm run build:server && npm run build:client",
+    "build:engine": "node node_modules/typescript/bin/tsc -p packages/engine/tsconfig.json",
+    "build:server": "node node_modules/typescript/bin/tsc -p packages/server/tsconfig.json",
+    "build:client": "node node_modules/esbuild/bin/esbuild packages/client/src/main.ts --bundle --outfile=packages/server/public/app.js --format=iife --target=es2020",
     "test": "npm run build && node --test packages/engine/dist/engine.test.js",
     "start": "npm run build && node packages/server/dist/index.js"
   },
