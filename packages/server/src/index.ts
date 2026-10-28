@@ -42,6 +42,7 @@ if (!config && !RaceHost.restore(SNAP_DIR)) {
 }
 
 let host = RaceHost.restore(SNAP_DIR) || new RaceHost(config!, SNAP_DIR);
+// (après restore, le monde est régénéré depuis la graine — host.race.world est complet)
 
 // Résumé du tracé (1 point / km) précalculé — évite de filtrer 300k points à chaque broadcast
 const pathSummary = host.race.world.points

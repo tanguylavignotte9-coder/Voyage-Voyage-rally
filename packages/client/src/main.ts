@@ -767,14 +767,14 @@ function drawMap(m: CanvasRenderingContext2D, w: number, h: number): void {
 
   // VRAI tracé (vue du dessus) — le tracé 2D réel du monde, échantillonné au km
   const pts = state.pathSummary ?? [];
+  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const span = Math.max(maxX - minX, maxY - minY) * 1.1;
+  const cx0 = (minX + maxX) / 2, cy0 = (minY + maxY) / 2;
+  const mapX = (x: number) => w / 2 + ((x - cx0) / span) * Math.min(w - 60, h * 1.6);
+  const mapY = (y: number) => h * 0.52 + ((y - cy0) / span) * Math.min(w - 60, h * 1.6);
   if (pts.length > 1) {
-    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
-    const minX = Math.min(...xs), maxX = Math.max(...xs);
-    const minY = Math.min(...ys), maxY = Math.max(...ys);
-    const span = Math.max(maxX - minX, maxY - minY) * 1.1;
-    const cx0 = (minX + maxX) / 2, cy0 = (minY + maxY) / 2;
-    const mapX = (x: number) => w / 2 + ((x - cx0) / span) * Math.min(w - 60, h * 1.6);
-    const mapY = (y: number) => h * 0.52 + ((y - cy0) / span) * Math.min(w - 60, h * 1.6);
     m.strokeStyle = "#d9a441";
     m.lineWidth = 3;
     m.beginPath();
@@ -815,17 +815,33 @@ function drawMap(m: CanvasRenderingContext2D, w: number, h: number): void {
   });
   m.stroke();
 
+  // stations, villages, ponts: positionnés sur le VRAI tracé (position 2D la plus proche)
   m.font = "11px sans-serif";
+  const onPath = (km: number) => {
+    let best = pts[0], bd = Infinity;
+    for (const p of pts) {
+      const d = Math.abs(p.km - km);
+      if (d < bd) { bd = d; best = p; }
+    }
+    return { x: mapX(best.x), y: mapY(best.y) };
+  };
   state.world.stations.forEach((s: any) => {
-    const x = (s.km / total) * w;
-    m.fillText("⛽", x - 5, profileY(3000) + 14);
+    const pos = onPath(s.km);
+    m.fillText("⛽", pos.x - 5, pos.y - 10);
+    if (s.hasHotel) m.fillText("🏨", pos.x + 8, pos.y - 10);
     m.fillStyle = "#fff";
-    m.fillText(s.name, x - 20, profileY(3000) + 28);
+    m.fillText(s.name, pos.x - 20, pos.y - 22);
     m.fillStyle = "#000";
   });
   state.world.villages.forEach((v: any) => {
+    const pos = onPath(v.km);
     m.fillStyle = "#ddd";
-    m.fillText("🏠", (v.km / total) * w - 5, profileY(3000) + 40);
+    m.fillText("🏠", pos.x - 5, pos.y + 16);
+  });
+  (state.world.bridges ?? []).forEach((b: any) => {
+    const pos = onPath(b.km);
+    m.fillStyle = "#a86";
+    m.fillText("＝", pos.x - 5, pos.y + 6);
   });
   // Fronts météo mobiles visibles sur la carte (on voit la tempête arriver)
   const FRONT_COLORS: Record<string, string> = {
