@@ -95,10 +95,10 @@ function connect(): void {
     const msg = JSON.parse(ev.data);
     if (msg.type === "path_chunk") {
       pathChunks.set(msg.fromKm, msg.points);
-      // purge: garder une fenêtre glissante (max 40 chunks = 80 km)
-      if (pathChunks.size > 40) {
+      // purge: fenêtre glissante (max 16 chunks = 64 km autour de nous)
+      if (pathChunks.size > 16) {
         const keys = [...pathChunks.keys()].sort((a, b) => Math.abs(a - lastKnownKm) - Math.abs(b - lastKnownKm));
-        while (pathChunks.size > 40) pathChunks.delete(keys.pop()!);
+        while (pathChunks.size > 16) pathChunks.delete(keys.pop()!);
       }
       return;
     }
@@ -918,10 +918,9 @@ cv.addEventListener("wheel", (e) => {
 // Tracé réel: les chunks de polyligne 2D du monde, demandés au serveur.
 // pathPoint(k) interpole dans les chunks — la vue dessine le VRAI monde.
 function pathPoint(k: number): { x: number; y: number } | null {
-  const base = Math.floor(k / 2) * 2;
+  const base = Math.floor(k / 4) * 4; // chunks de 4 km
   const chunk = pathChunks.get(base);
   if (!chunk || chunk.length === 0) return null;
-  // chunk: points tous les 25 m sur [base, base+2[
   const fi = ((k - base) * 1000) / 20; // pas du tracé: 20 m
   const i0 = Math.max(0, Math.min(chunk.length - 1, Math.floor(fi)));
   const i1 = Math.min(chunk.length - 1, i0 + 1);
@@ -955,25 +954,28 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
   }
   const carAngle = Math.atan2(meAhead.y - me.y, meAhead.x - me.x);
 
-  // caméra retardataire: vise un point devant la voiture, rattrape en douceur
-  const targetX = me.x + Math.cos(carAngle) * 30;
-  const targetY = me.y + Math.sin(carAngle) * 30;
+  // CAMÉRA ALIGNÉE: l'axe de la voiture = axe vertical de l'écran (on roule
+  // « vers le haut»). La caméra suit la POSITION avec un léger retard
+  // (élégance dans les virages), mais l'ANGLE suit le cap de la voiture
+  // franchement (15%/frame — elle pivote avec nous, la route tourne autour).
+  const targetX = me.x;
+  const targetY = me.y;
   if (!camInit) { camX = targetX; camY = targetY; camAngle = carAngle; camInit = true; }
-  const follow = 0.08;
+  const follow = 0.12;
   camX += (targetX - camX) * follow;
   camY += (targetY - camY) * follow;
-  // rotation douce de la caméra vers le cap (amortie)
   let dAng = carAngle - camAngle;
   while (dAng > Math.PI) dAng -= 2 * Math.PI;
   while (dAng < -Math.PI) dAng += 2 * Math.PI;
-  camAngle += dAng * 0.05;
+  camAngle += dAng * 0.15;
 
   // transformation monde -> écran
   const W2S = (x: number, y: number): [number, number] => {
     const dx = x - camX, dy = y - camY;
     const rx = dx * Math.cos(-camAngle) - dy * Math.sin(-camAngle);
     const ry = dx * Math.sin(-camAngle) + dy * Math.cos(-camAngle);
-    return [w / 2 + rx * PXM, h * 0.62 + ry * PXM];
+    // voiture basse à l'écran: 30% du bas → la route s'étire loin devant
+    return [w / 2 + rx * PXM, h * 0.70 + ry * PXM];
   };
 
   // sol
@@ -981,7 +983,7 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
   ctx.fillRect(0, 0, w, h);
 
   // ---------- ROUTE: le vrai tracé, large bande, tous les points visibles ----------
-  const half = 0.09; // ±90 m autour de nous
+  const half = 0.26; // ±260 m: la route se dessine loin devant/après
   const roadWm = seg?.width === "etroite" ? 3.5 : seg?.width === "moyenne" ? 5 : 6.5;
   // collecter les points du tracé dans la fenêtre
   const path: { x: number; y: number }[] = [];
@@ -1023,17 +1025,20 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     const v = Math.sin(n * 127.1) * 43758.5453;
     return v - Math.floor(v);
   };
-  const decorStep = 12; // tous les 12 m
+  // DEUX RANGÉES de décors ancrés au monde: bande rapprochée (10-40 m) et
+  // horizon proche (40-110 m) — l'environnement existe au-delà du ruban.
+  const decorStep = 10; // tous les 10 m le long du tracé
   const dStart = Math.floor((km - half) * 1000 / decorStep) * decorStep;
   for (let dm = dStart; dm <= (km + half) * 1000; dm += decorStep) {
     const k = dm / 1000;
     const p = pathPoint(k);
     if (!p) continue;
-    const idx = Math.round(dm / decorStep);
+    for (let row = 0; row < 2; row++) {
+    const idx = Math.round(dm / decorStep) * 2 + row;
     const r1 = hash(idx * 3 + 1), r2 = hash(idx * 7 + 2), r3 = hash(idx * 11 + 3);
-    if (r3 < 0.45) continue;
+    if (r3 < 0.32) continue;
     const side = r2 < 0.5 ? -1 : 1;
-    const dist = roadWm + 5 + r1 * 26;
+    const dist = row === 0 ? roadWm + 6 + r1 * 30 : roadWm + 38 + r1 * 70;
     // normale au tracé à cette position
     const pA = pathPoint(k - 0.002), pB = pathPoint(k + 0.002);
     if (!pA || !pB) continue;
@@ -1044,7 +1049,7 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     if (sx < -40 || sx > w + 40 || sy < -40 || sy > h + 40) continue;
     const sz = (0.9 + r1 * 2.4) * PXM;
     if (r3 < 0.72) {
-      ctx.fillStyle = "rgba(95,85,68,0.9)";
+      ctx.fillStyle = row === 1 ? "rgba(85,76,61,0.75)" : "rgba(95,85,68,0.9)";
       ctx.beginPath();
       ctx.ellipse(sx, sy, sz, sz * 0.72, 0, 0, Math.PI * 2);
       ctx.fill();
@@ -1060,10 +1065,11 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
       ctx.lineTo(sx + sz * 0.8, sy - sz);
       ctx.stroke();
     } else {
-      ctx.fillStyle = seg?.biome === "humide" ? "rgba(45,100,55,0.85)" : "rgba(75,115,55,0.8)";
+      ctx.fillStyle = seg?.biome === "humide" ? (row === 1 ? "rgba(38,88,48,0.7)" : "rgba(45,100,55,0.85)") : (row === 1 ? "rgba(62,98,46,0.7)" : "rgba(75,115,55,0.8)");
       ctx.beginPath();
       ctx.ellipse(sx, sy, sz * 1.25, sz, 0, 0, Math.PI * 2);
       ctx.fill();
+    }
     }
   }
 
@@ -1430,8 +1436,8 @@ $("btn-sound").addEventListener("click", () => {
 // demande des chunks de tracé autour de la position (fenêtre glissante ±3 km)
 setInterval(() => {
   if (!state || !myId || lastKnownSpeed <= 0) return;
-  const center = Math.floor(lastKnownKm / 2) * 2;
-  for (let c = center - 4; c <= center + 4; c += 2) {
+  const center = Math.floor(lastKnownKm / 4) * 4;
+  for (let c = center - 8; c <= center + 8; c += 4) {
     if (c < 0) continue;
     if (!pathChunks.has(c)) send({ type: "get_path_chunk", fromKm: c });
   }

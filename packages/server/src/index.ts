@@ -302,7 +302,7 @@ wss.on("connection", (ws) => {
         // tracé par tronçons de 2 km — le client demande autour de sa position
         if (!host.race.world.points || host.race.world.points.length === 0) return;
         const fromKm = Math.max(0, msg.fromKm | 0);
-        const toKm = fromKm + 2;
+        const toKm = fromKm + 4;
         const pts = host.race.world.points.filter((p: any) => p.km >= fromKm && p.km < toKm);
         ws.send(JSON.stringify({ type: "path_chunk", fromKm, points: pts }));
         break;
