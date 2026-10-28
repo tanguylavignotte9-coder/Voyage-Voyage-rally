@@ -17,14 +17,26 @@ export interface WorldGenParams {
 
 const BIOMES: Biome[] = ["desert", "montagne", "steppe", "humide"];
 
-const TERRAINS_BY_BIOME: Record<Biome, TerrainType[]> = {
-  desert: ["dunes", "regs", "piste_moyenne", "piste_mauvaise"],
-  montagne: ["col", "pierrier", "piste_mauvaise", "piste_moyenne"],
-  steppe: ["piste_rapide", "piste_moyenne", "piste_mauvaise"],
-  humide: ["bourbier", "marécage", "piste_mauvaise", "piste_moyenne"],
+// Distribution pondérée des terrains — un raid réel est majoritairement roulant,
+// avec des sections difficiles concentrées (dunes en erg, cols en montagne…).
+const TERRAIN_WEIGHTS: Record<Biome, [TerrainType, number][]> = {
+  desert: [["piste_moyenne", 0.3], ["regs", 0.25], ["dunes", 0.2], ["piste_mauvaise", 0.15], ["piste_rapide", 0.1]],
+  montagne: [["piste_moyenne", 0.3], ["col", 0.25], ["piste_mauvaise", 0.25], ["pierrier", 0.2]],
+  steppe: [["piste_rapide", 0.35], ["piste_moyenne", 0.4], ["piste_mauvaise", 0.25]],
+  humide: [["piste_moyenne", 0.35], ["piste_rapide", 0.1], ["piste_mauvaise", 0.25], ["bourbier", 0.18], ["marécage", 0.12]],
 };
 
-export const AVG_SPEED_KMH = 50;
+function pickTerrain(rng: Rng, biome: Biome): TerrainType {
+  const weights = TERRAIN_WEIGHTS[biome];
+  let r = rng.next();
+  for (const [t, w] of weights) {
+    r -= w;
+    if (r <= 0) return t;
+  }
+  return weights[weights.length - 1][0];
+}
+
+export const AVG_SPEED_KMH = 40; // vitesse moyenne effective constat00e9e en simulation (sommeil, nuits, arrêts inclus)
 
 export function generateWorld(params: WorldGenParams): World {
   const rng = new Rng(params.seed);
@@ -66,13 +78,13 @@ export function generateWorld(params: WorldGenParams): World {
     }
     biomeKmLeft -= segmentLength;
 
-    const terrain = rng.pick(TERRAINS_BY_BIOME[currentBiome]);
+    const terrain = pickTerrain(rng, currentBiome);
     if (currentBiome === "montagne") {
-      altitude += rng.range(-150, 250);
+      altitude += rng.range(-180, 350);
     } else if (currentBiome === "humide") {
-      altitude += rng.range(-50, 50);
+      altitude += rng.range(-40, 40);
     } else {
-      altitude += rng.range(-40, 60);
+      altitude += rng.range(-60, 90);
     }
     altitude = Math.max(0, Math.min(3500, altitude));
     segments.push({
@@ -101,7 +113,8 @@ export function generateWorld(params: WorldGenParams): World {
       hasHotel: rng.chance(0.4),
     });
     stationIdx++;
-    nextStationKm += rng.range(300, 500) * (seg.biome === "humide" ? 0.9 : 1);
+    const spacing = seg.biome === "desert" ? rng.range(260, 380) : seg.biome === "humide" ? rng.range(320, 480) : rng.range(300, 480);
+    nextStationKm += spacing;
   }
   stations.push({ km: totalKm, name: "Arrivée", hasHotel: true });
 

@@ -151,18 +151,8 @@ export interface StationWork {
 }
 
 export const TICKS_PER_HOUR = 3600;
-export const FUEL_PRICE_PER_LITRE = 1.8;
-export const TIRE_PRICE = 120;
-export const HOTEL_PRICE = 80;
-export const REPAIR_PRICE_BASE: Record<string, number> = { moteur: 500, transmission: 400, pneus_av: 120, pneus_ar: 120, suspensions: 300, chassis: 450, freins: 250, refroidissement: 280 };
-export const REPAIR_HOURS: Record<string, number> = { moteur: 4, transmission: 3, pneus_av: 0.75, pneus_ar: 0.75, suspensions: 2, chassis: 3, freins: 1.5, refroidissement: 1.5 };
-export const FUEL_TIME_PER_PERCENT = 0.25 / 100;
-export const DAILY_PRIME_BASE = 300;
-export const DAILY_PRIME_RANK_BONUS = 50;
-export const CHALLENGE_PRIME = 150;
 export const TRUCK_FIXED_HOURS = 6;
-export const ACCIDENT_FAULT_PENALTY = 250;
-
+export { FUEL_CAPACITY_L, BUDGET_START } from "./calibration";
 export interface CarStats {
   distance: number;
   maxSpeed: number;

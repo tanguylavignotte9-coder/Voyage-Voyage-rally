@@ -1,4 +1,5 @@
-import { DEFAULT_RULES, CarState, World, WeatherFront, PlayerRule, DAILY_PRIME_BASE, DAILY_PRIME_RANK_BONUS, CHALLENGE_PRIME, TICKS_PER_HOUR } from "./types";
+import { DEFAULT_RULES, CarState, World, WeatherFront, PlayerRule, TICKS_PER_HOUR, FUEL_CAPACITY_L, BUDGET_START } from "./types";
+import { DAILY_PRIME_BASE, DAILY_PRIME_RANK_BONUS, CHALLENGE_PRIME } from "./calibration";
 import { generateWorld, generateWeatherFronts } from "./world";
 import { Rng, seedFromString } from "./rng";
 import { tickCar, SimContext, grantPrime, mental } from "./sim";
@@ -66,8 +67,8 @@ export class Race {
       playerId: id,
       color,
       positionKm: 0,
-      fuel: 60,
-      fuelCapacity: 60,
+      fuel: FUEL_CAPACITY_L,
+      fuelCapacity: FUEL_CAPACITY_L,
       organs: {
         moteur: 0, transmission: 0, pneus_av: 0, pneus_ar: 0,
         suspensions: 0, chassis: 0, freins: 0, refroidissement: 0,
@@ -77,9 +78,9 @@ export class Race {
       pace: "prudente",
       risk: "normal",
       rules: JSON.parse(JSON.stringify(DEFAULT_RULES)),
-      settings: { tirePressure: 50, groundClearance: 50, engineMap: 50, startFuel: 60 },
+      settings: { tirePressure: 50, groundClearance: 50, engineMap: 50, startFuel: FUEL_CAPACITY_L },
       spareWheels: 1,
-      budget: 1000,
+      budget: BUDGET_START,
       arrived: false,
       arrivalTime: null,
       finisherRank: null,

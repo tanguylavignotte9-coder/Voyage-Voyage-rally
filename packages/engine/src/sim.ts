@@ -1,65 +1,19 @@
-import { TICKS_PER_HOUR, CarState,
-  OrganId,
-  PaceLevel,
-  RiskLevel,
-  TerrainSegment,
-  World,
-  WeatherFront,
-  Station,
-  StationWork,
-  REPAIR_PRICE_BASE,
-  REPAIR_HOURS,
-  FUEL_PRICE_PER_LITRE,
-  TIRE_PRICE,
-  HOTEL_PRICE,
-  TRUCK_FIXED_HOURS,
-  ACCIDENT_FAULT_PENALTY,
-} from "./types";
+import { CarState, OrganId, TerrainSegment, World, WeatherFront, Station, StationWork, TICKS_PER_HOUR, TRUCK_FIXED_HOURS } from "./types";
+import {
+  BASE_SPEED_KMH, PACE_SPEED_FACTOR, TERRAIN_SPEED_KMH, PACE_CONSUMPTION_FACTOR,
+  FUEL_BASE_L_PER_100KM, FUEL_TERRAIN_FACTOR, RISK_CONSUMPTION_FACTOR, WEIGHT_SPEED_PENALTY_FULL,
+  WEAR_PER_KM, WEAR_TERRAIN_FACTOR, WEAR_ORGAN_WEATHER, RISK_WEAR_FACTOR, RISK_SPEED_BONUS,
+  FATIGUE_PER_HOUR, FATIGUE_NIGHT_FACTOR, FATIGUE_WEATHER_FACTOR,
+  FATIGUE_RECOVERY_BIVOUC_PER_HOUR, FATIGUE_RECOVERY_HOTEL_PER_HOUR,
+  BREAKDOWN_BASE_PER_HOUR, ACCIDENT_FATIGUE_PER_HOUR, DEBRIS_BASE_PER_HOUR, RISK_ACCIDENT_FACTOR,
+  FUEL_PRICE_PER_LITRE, TIRE_PRICE, HOTEL_PRICE, REPAIR_PRICE_BASE, REPAIR_HOURS, ACCIDENT_FAULT_PENALTY,
+  settingsEffects,
+} from "./calibration";
 import { segmentAt, nextStation, weatherAt } from "./world";
 import { Rng } from "./rng";
 import { GameVariables, tickPlanner, ActiveEffects } from "./planner";
 
 export const TICK_SECONDS = 1;
-
-const PACE_SPEED_FACTOR: Record<PaceLevel, number> = {
-  lift_and_coast: 0.6,
-  prudente: 0.75,
-  normale: 0.9,
-  soutenue: 1.0,
-  attaque: 1.1,
-};
-
-const PACE_CONSUMPTION: Record<PaceLevel, number> = {
-  lift_and_coast: 0.6,
-  prudente: 0.8,
-  normale: 1.0,
-  soutenue: 1.25,
-  attaque: 1.5,
-};
-
-const TERRAIN_SPEED: Record<string, number> = {
-  piste_rapide: 1.0,
-  piste_moyenne: 0.8,
-  piste_mauvaise: 0.6,
-  dunes: 0.4,
-  regs: 0.6,
-  pierrier: 0.5,
-  col: 0.45,
-  bourbier: 0.35,
-  marécage: 0.3,
-};
-
-const TERRAIN_WEAR: Record<string, number> = {
-  piste_rapide: 0.4,
-  piste_moyenne: 0.7,
-  piste_mauvaise: 1.0,
-  dunes: 1.8,
-  regs: 1.1,
-  pierrier: 1.4,
-  col: 1.3,
-  bourbier: 1.6,
-  marécage: 1.8,
-};
 
 export function darknessFactor(hourOfDay: number): number {
   if (hourOfDay >= 21 || hourOfDay < 5) return 1.0;
@@ -69,18 +23,23 @@ export function darknessFactor(hourOfDay: number): number {
 }
 
 export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string, darkness: number): number {
-  let v = 55 * PACE_SPEED_FACTOR[car.pace];
-  v *= TERRAIN_SPEED[seg.terrain] ?? 0.7;
-  if (seg.slope > 0) v *= Math.max(0.4, 1 - seg.slope * 0.5);
-  else if (seg.slope < -0.02) v *= 1.05;
-  if (weather === "tempete_sable" || weather === "pluie_diluvienne") v *= 0.4;
-  else if (weather === "brouillard" || weather === "grele" || weather === "vent_fort") v *= 0.6;
+  const eff = settingsEffects(car.settings);
+  let v = BASE_SPEED_KMH * (PACE_SPEED_FACTOR[car.pace] ?? 0.85) * eff.power;
+  const terrainV = TERRAIN_SPEED_KMH[seg.terrain] ?? 70;
+  // la vitesse effective tend vers la limite du terrain, pas seulement multiplicative
+  v = Math.min(v, terrainV * (1 + ((PACE_SPEED_FACTOR[car.pace] ?? 0.85) - 1) * 0.35) * RISK_SPEED_BONUS[car.risk]);
+  if (seg.terrain === "dunes" || seg.terrain === "regs") v *= eff.speedSand;
+  else v *= eff.speedHard;
+  if (seg.terrain === "pierrier" || seg.terrain === "col") v *= eff.speedRocks;
+  if (seg.slope > 0) v *= Math.max(0.5, 1 - seg.slope * 0.015);
+  else if (seg.slope < -1) v *= 1.03;
+  if (weather === "tempete_sable" || weather === "pluie_diluvienne") v *= 0.35;
+  else if (weather === "brouillard" || weather === "grele" || weather === "vent_fort") v *= 0.55;
   else if (weather === "canicule" || weather === "froid_intense") v *= 0.85;
-  v *= 1 - darkness * 0.35;
-  if (car.fatigue > 70) v *= 1 - ((car.fatigue - 70) / 100) * 0.4;
+  v *= 1 - darkness * 0.3;
+  if (car.fatigue > 70) v *= 1 - ((car.fatigue - 70) / 100) * 0.35;
   if (car.crevaison) v *= 0.5;
-  const weightFactor = 1 - (car.fuel / car.fuelCapacity) * 0.05;
-  v *= weightFactor;
+  v *= 1 - (car.fuel / car.fuelCapacity) * WEIGHT_SPEED_PENALTY_FULL;
   if (car.towedBy) v *= 0.7;
   return Math.max(0, v);
 }
@@ -184,7 +143,7 @@ function tickCarInternal(car: CarState, ctx: SimContext, emit: (t: string) => vo
   if (car.sleeping > 0) {
     car.sleeping -= TICK_SECONDS / 3600;
     const hotelish = car.sleepPlace === "hotel";
-    const recovery = hotelish ? 12 : 8;
+    const recovery = hotelish ? FATIGUE_RECOVERY_HOTEL_PER_HOUR : FATIGUE_RECOVERY_BIVOUC_PER_HOUR;
     car.fatigue = Math.max(0, car.fatigue - recovery * (TICK_SECONDS / 3600));
     car.speedKmh = 0;
     if (car.sleeping <= 0) {
@@ -228,14 +187,28 @@ function tickCarInternal(car: CarState, ctx: SimContext, emit: (t: string) => vo
   }
 
   const station = stationHere(ctx, car);
-  if (station && (effects.fuelTarget || effects.repairOrgan || effects.replaceWheel || effects.stopAtStation)) {
+  const wantsStation = !!(effects.fuelTarget || effects.repairOrgan || effects.replaceWheel || effects.stopAtStation);
+  if (station && wantsStation) {
     if (startStationWork(car, ctx, station, effects, emit)) return;
   }
 
-  const riskFactor = car.risk === "haut" ? 1.8 : car.risk === "bas" ? 0.6 : 1.0;
+  const riskFactor = RISK_WEAR_FACTOR[car.risk];
 
   let speed = computeSpeed(car, seg, weather, darkness);
   speed = applyTrafficEffects(car, ctx, speed, riskFactor, emit);
+
+  // Arrêt planifié: si des prestations sont demandées mais qu'on n'est pas encore à la station,
+  // la voiture s'arrête à la station suivante (elle ne dépasse jamais la station visée).
+  const nextSt = wantsStation ? nextStation(ctx.world.stations, car.positionKm) : null;
+  if (nextSt && !car.stopWork) {
+    const distanceToStation = nextSt.km - car.positionKm;
+    if (distanceToStation <= (speed * TICK_SECONDS) / 3600) {
+      car.positionKm = nextSt.km;
+      car.speedKmh = 0;
+      if (startStationWork(car, ctx, nextSt, effects, emit)) return;
+    }
+  }
+
   car.speedKmh = speed;
   const distanceDelta = (speed * TICK_SECONDS) / 3600;
   const prevPos = car.positionKm;
@@ -245,12 +218,21 @@ function tickCarInternal(car: CarState, ctx: SimContext, emit: (t: string) => vo
   car.stats.maxSpeed = Math.max(car.stats.maxSpeed, speed);
   car.dailyMaxSpeed = Math.max(car.dailyMaxSpeed, speed);
 
-  const consumptionPerKm = 0.12 * PACE_CONSUMPTION[car.pace] * (TERRAIN_WEAR[seg.terrain] ?? 1) * (1 + riskFactor * 0.15);
+  const eff = settingsEffects(car.settings);
+  const consumptionPerKm =
+    (FUEL_BASE_L_PER_100KM / 100) *
+    PACE_CONSUMPTION_FACTOR[car.pace] *
+    (FUEL_TERRAIN_FACTOR[seg.terrain] ?? 1.3) *
+    RISK_CONSUMPTION_FACTOR[car.risk] *
+    eff.consumption;
   car.fuel = Math.max(0, car.fuel - consumptionPerKm * distanceDelta);
 
-  const fatigueRate = (0.5 + darkness * 1.0 + (weather !== "clair" ? 0.5 : 0)) * (car.pace === "attaque" ? 1.5 : 1);
+  const fatigueRate =
+    FATIGUE_PER_HOUR[car.pace] *
+    (1 + darkness * (FATIGUE_NIGHT_FACTOR - 1)) *
+    (weather !== "clair" ? FATIGUE_WEATHER_FACTOR : 1);
   wearUpdate(car, seg, weather, riskFactor, distanceDelta, ctx, emit);
-  car.fatigue = Math.min(100, car.fatigue + fatigueRate * (TICK_SECONDS / 3600) * 2);
+  car.fatigue = Math.min(100, car.fatigue + fatigueRate * (TICK_SECONDS / 3600));
 
   if (car.fatigue > 70 && ctx.tick % 3600 === 0) mental(car, ctx.tick, "Mes paupières sont lourdes…");
   if (car.fatigue > 85 && ctx.tick % 1800 === 0) mental(car, ctx.tick, "Je lutte pour garder les yeux ouverts. C'est dangereux.");
@@ -322,7 +304,12 @@ function startStationWork(
     if (work.replaceWheel) hours += 0.5;
   }
   if (work.repairOrgan) {
-    const organ = work.repairOrgan;
+    let organ: OrganId = work.repairOrgan;
+    if (car.organs[organ] < 60) {
+      const mostWorn = (Object.keys(car.organs) as OrganId[]).sort((a, b) => car.organs[b] - car.organs[a])[0];
+      if (car.organs[mostWorn] > car.organs[organ]) organ = mostWorn;
+      work.repairOrgan = organ;
+    }
     const price = REPAIR_PRICE_BASE[organ] * (0.6 + (car.organs[organ] / 100) * 0.6);
     if (pay(car, ctx.tick, `la réparation ${organ}`, price)) {
       hours += REPAIR_HOURS[organ] * (0.4 + (car.organs[organ] / 100) * 0.6);
@@ -371,6 +358,14 @@ function finishStationWork(car: CarState, ctx: SimContext, emit: (t: string) => 
 }
 
 function tickImmobilized(car: CarState, ctx: SimContext, emit: (t: string) => void): void {
+  car.fatigue = Math.max(0, car.fatigue - (FATIGUE_RECOVERY_BIVOUC_PER_HOUR / 2) * (TICK_SECONDS / 3600));
+  const vars = buildVariables(car, ctx);
+  const { effects } = tickPlanner(car, vars);
+  if (effects.callTruck && car.truckCalledTick === null) {
+    car.truckCalledTick = ctx.tick;
+    mental(car, ctx.tick, "J'appelle le camion d'assistance… 6 h d'attente.");
+    emit(`${car.playerId} appelle le camion d'assistance`);
+  }
   if (car.truckCalledTick === null) return;
   const readyAt = car.truckCalledTick + TRUCK_FIXED_HOURS * 3600;
   if (ctx.tick < readyAt) return;
@@ -477,35 +472,40 @@ function wearUpdate(
   ctx: SimContext,
   emit: (t: string) => void
 ): void {
-  const bump = (organ: OrganId, amount: number) => {
+  const terrainF = WEAR_TERRAIN_FACTOR[seg.terrain] ?? 1.3;
+  const slopeF = seg.slope > 0 ? 1 + seg.slope * 0.04 : 1;
+  const bump = (organ: OrganId, extra: number) => {
+    const weatherF = (WEAR_ORGAN_WEATHER[organ] ?? {})[weather] ?? 1;
+    const amount =
+      WEAR_PER_KM[organ] * terrainF * weatherF * slopeF * riskFactor * extra * distanceDelta;
     const before = car.organs[organ];
-    car.organs[organ] = Math.min(100, car.organs[organ] + amount);
+    let next = car.organs[organ] + amount;
+    if (car.crevaison && car.crevaisonOrgan === organ) next = Math.min(next, 90);
+    car.organs[organ] = Math.min(100, next);
     if (before < 60 && car.organs[organ] >= 60) mental(car, ctx.tick, SYMPTOMS[organ].vague);
     if (before < 80 && car.organs[organ] >= 80) mental(car, ctx.tick, SYMPTOMS[organ].grave);
     if (car.organs[organ] >= 100) breakOrgan(car, organ, ctx, emit);
   };
-
-  const base = distanceDelta / 100;
-  bump("moteur", base * 0.5 * riskFactor * (weather === "canicule" ? 1.5 : 1) * (seg.slope > 0 ? 1.3 : 1));
-  bump("transmission", base * 0.4 * riskFactor);
-  bump("pneus_av", base * 0.8 * (TERRAIN_WEAR[seg.terrain] ?? 1) * riskFactor * (weather === "tempete_sable" ? 1.2 : 1));
-  bump("pneus_ar", base * 0.7 * (TERRAIN_WEAR[seg.terrain] ?? 1) * riskFactor);
-  bump("suspensions", base * 0.6 * (TERRAIN_WEAR[seg.terrain] ?? 1) * riskFactor);
-  bump("chassis", base * 0.2 * riskFactor);
-  bump("freins", base * (seg.slope < -0.02 ? 1.5 : 0.3) * riskFactor);
-  bump("refroidissement", base * 0.4 * (weather === "tempete_sable" || weather === "canicule" ? 1.8 : 1));
-
-  probabilisticFailure(car, riskFactor, ctx, emit);
+  bump("moteur", 1);
+  bump("transmission", 1);
+  bump("pneus_av", 1);
+  bump("pneus_ar", 1);
+  bump("suspensions", 1);
+  bump("chassis", 1);
+  bump("freins", seg.slope < -0.02 ? 2.5 : 1);
+  bump("refroidissement", 1);
+  probabilisticFailure(car, ctx, emit);
 }
 
-function probabilisticFailure(car: CarState, riskFactor: number, ctx: SimContext, emit: (t: string) => void): void {
-  const perTick = TICK_SECONDS / 3600;
+function probabilisticFailure(car: CarState, ctx: SimContext, emit: (t: string) => void): void {
+  const perHour = TICK_SECONDS / 3600;
+  const riskAcc = RISK_ACCIDENT_FACTOR[car.risk];
   for (const [organ, wear] of Object.entries(car.organs) as [OrganId, number][]) {
     if (wear < 80) continue;
-    const p = perTick * (wear - 79) * 0.02 * riskFactor;
+    const p = perHour * (wear - 80) * BREAKDOWN_BASE_PER_HOUR * 5 * riskAcc;
     if (ctx.rng.chance(p)) breakOrgan(car, organ, ctx, emit);
   }
-  const accidentP = perTick * (car.fatigue > 70 ? (car.fatigue - 70) * 0.01 : 0) * riskFactor;
+  const accidentP = perHour * (car.fatigue > 70 ? (car.fatigue - 70) * ACCIDENT_FATIGUE_PER_HOUR : 0) * riskAcc;
   if (ctx.rng.chance(accidentP)) {
     car.stats.accidents++;
     car.organs.chassis = Math.min(100, car.organs.chassis + 30);
@@ -520,7 +520,8 @@ function probabilisticFailure(car: CarState, riskFactor: number, ctx: SimContext
     }
   }
   const terrain = segmentAt(ctx.world.segments, car.positionKm).terrain;
-  const rockP = perTick * 0.01 * riskFactor * (terrain === "pierrier" ? 3 : terrain === "regs" ? 2 : 1);
+  const terrainDebrisF = terrain === "pierrier" ? 3 : terrain === "regs" ? 2 : 1;
+  const rockP = perHour * DEBRIS_BASE_PER_HOUR * terrainDebrisF * riskAcc;
   if (ctx.rng.chance(rockP)) {
     if (ctx.rng.chance(0.5)) {
       car.crevaison = true;
@@ -528,7 +529,7 @@ function probabilisticFailure(car: CarState, riskFactor: number, ctx: SimContext
       car.organs[car.crevaisonOrgan] = Math.max(car.organs[car.crevaisonOrgan], 85);
       mental(car, ctx.tick, "Un caillou ! Je sens comme une crevaison…");
     } else {
-      car.fatigue = Math.min(100, car.fatigue + 5);
+      car.fatigue = Math.min(100, car.fatigue + 3);
       mental(car, ctx.tick, "Un animal sur la piste ! Je l'ai évité de justesse.");
     }
   }

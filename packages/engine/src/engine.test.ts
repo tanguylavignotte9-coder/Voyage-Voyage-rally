@@ -45,7 +45,7 @@ test("vitesse: dunes plus lentes que piste rapide", () => {
   const car = mkCar("normale");
   const vRapide = computeSpeed(car, { km: 0, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "large" }, "clair", 0);
   const vDunes = computeSpeed(car, { km: 0, biome: "desert", terrain: "dunes", altitude: 0, slope: 0, width: "moyenne" }, "clair", 0);
-  assert.ok(vDunes < vRapide * 0.6);
+  assert.ok(vDunes < vRapide * 0.7);
 });
 
 test("vitesse: pénalité nuit et fatigue", () => {
