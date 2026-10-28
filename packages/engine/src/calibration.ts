@@ -104,7 +104,45 @@ export const PACE_CONSUMPTION_FACTOR: Record<string, number> = {
   attaque: 1.25,
 };
 
-// ---------- Usure par organe (%/km, allure normale, piste moyenne, risque normal) ----------
+// ========== USURE ÉMERGENTE: loi contrainte -> fatigue matérielle ==========
+// L'usure d'un organe découle de la CONTRAINTE qu'il subit ce tick, pas d'une
+// table au km. Chaque organe a une résistante (charge nominale) et une
+// loi d'endommagement (à la Paris: dommage ∝ (contrainte/limite)^n, n>1 —
+// proche de la limite, l'usure explose; en dessous, quasi négligeable).
+export interface OrganLoadModel {
+  // contrainte du tick en Newton (calculée depuis les forces physiques)
+  // -> dommage = K_organ × (contrainte / chargeNominale)^n × dt
+  nominalLoadN: number;   // charge de conception (durée de vie nominale)
+  expo: number;           // exposant de la loi d'endommagement (>1 = seuil mou)
+  damagePerHourAtNominal: number; // %/h d'usure à charge nominale
+}
+
+export const ORGAN_MODELS: Record<string, OrganLoadModel> = {
+  // nominale ~ 2.2× la charge statique de l'organe (m·g/4 ≈ 5450 N):
+  // en usage doux on vit à 0.3-0.6×nominale, en raid dur 0.8-1.1×,
+  // les extrêmes dépassent.
+  moteur:        { nominalLoadN: 9500,  expo: 2.6, damagePerHourAtNominal: 0.16 },
+  transmission:  { nominalLoadN: 9500,  expo: 2.8, damagePerHourAtNominal: 0.13 },
+  pneus_av:      { nominalLoadN: 12000, expo: 2.2, damagePerHourAtNominal: 0.20 },
+  pneus_ar:      { nominalLoadN: 12000, expo: 2.2, damagePerHourAtNominal: 0.22 },
+  suspensions:   { nominalLoadN: 13500, expo: 2.4, damagePerHourAtNominal: 0.18 },
+  chassis:       { nominalLoadN: 16000, expo: 3.0, damagePerHourAtNominal: 0.08 },
+  freins:        { nominalLoadN: 9000,  expo: 2.0, damagePerHourAtNominal: 0.13 },
+  refroidissement: { nominalLoadN: 8500, expo: 2.5, damagePerHourAtNominal: 0.12 },
+};
+
+// PANNE = ÉCHEC DE CHARGE: quand la contrainte dépasse la RÉSISTANCE RÉSIDUELLE
+// de l'organe (usure + aléa matérielle), il cède. Plus d'échelle 80%: un organe
+// à 40% usé soumis à une contrainte énorme (réception de saut à 200 km/h)
+// peut casser NET; un organe à 90% tenu gentil peut survivre des heures.
+export const STRENGTH_SCATTER = 0.18; // dispersion matérielle (σ/μ ~18%)
+export const WEATHER_STRESS: Record<string, number> = {
+  // la météo STRESSE les organes (facteur de charge, pas un multiplicateur d'usure)
+  tempete_sable: 1.35, canicule: 1.25, pluie_diluvienne: 1.2, grele: 1.15,
+  froid_intense: 1.15, vent_fort: 1.1, brouillard: 1.0, clair: 1.0,
+};
+
+// ---------- (legacy supprimé progressivement) Usure par organe ----------
 // Vies de référence : pneus ~2000 km, freins plaquettes ~4000 km (descente ×3),
 // moteur ~8000 km, suspensions ~7000 km, refroidissement ~6000 km (poussière),
 // transmission ~9000 km, châssis ~15000 km.

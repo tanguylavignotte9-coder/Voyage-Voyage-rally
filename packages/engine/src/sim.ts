@@ -3,10 +3,10 @@ import {
   CAR_MASS_KG, CAR_POWER_W, TRANSMISSION_EFF, ALTITUDE_POWER_LOSS, AERO_DRAG_COEFF, AIR_DENSITY, ROLLING_RES, LATERAL_GRIP,
   PACE_SPEED_FACTOR, PACE_CONSUMPTION_FACTOR,
   FUEL_BASE_L_PER_100KM, FUEL_TERRAIN_FACTOR, RISK_CONSUMPTION_FACTOR, WEIGHT_SPEED_PENALTY_FULL,
-  WEAR_PER_KM, WEAR_TERRAIN_FACTOR, WEAR_ORGAN_WEATHER, RISK_WEAR_FACTOR, RISK_SPEED_BONUS,
+  RISK_SPEED_BONUS,
   FATIGUE_PER_HOUR, FATIGUE_NIGHT_FACTOR, FATIGUE_WEATHER_FACTOR, slopeConsumptionFactor,
   FATIGUE_RECOVERY_BIVOUC_PER_HOUR, FATIGUE_RECOVERY_HOTEL_PER_HOUR,
-  BREAKDOWN_BASE_PER_HOUR, ACCIDENT_FATIGUE_PER_HOUR, DEBRIS_BASE_PER_HOUR, RISK_ACCIDENT_FACTOR,
+  ORGAN_MODELS, STRENGTH_SCATTER, WEATHER_STRESS, RISK_ACCIDENT_FACTOR,
   FUEL_PRICE_PER_LITRE, TIRE_PRICE, HOTEL_PRICE, REPAIR_PRICE_BASE, REPAIR_HOURS, ACCIDENT_FAULT_PENALTY,
   settingsEffects,
 } from "./calibration";
@@ -243,7 +243,7 @@ function tickCarInternal(car: CarState, ctx: SimContext, emit: (t: string) => vo
     if (startStationWork(car, ctx, station, effects, emit)) return;
   }
 
-  const riskFactor = RISK_WEAR_FACTOR[car.risk];
+  const riskFactor = 1; // le risque agit via l'audace physique (charges/accidents)
 
   let speed = computeSpeed(car, seg, weather, darkness, ctx.world);
   speed = applyTrafficEffects(car, ctx, speed, riskFactor, emit);
@@ -515,6 +515,46 @@ const SYMPTOMS: Record<OrganId, { vague: string; grave: string }> = {
   refroidissement: { vague: "La température monte doucement, le radiateur doit être encrassé.", grave: "Elle surchauffe, le moteur est bridé." },
 };
 
+// ========== USURE ÉMERGENTE: les organes subissent les FORCES du tick ==========
+// Chaque organe reçoit une contrainte (N) calculée depuis la physique du
+// moment: traction, chocs du terrain (∝ vitesse² × rugosité), freinage en
+// descente. L'usure suit la loi d'endommagement (contrainte/nominale)^expo —
+// en douceur ça vieillit à peine, à 200 km/h sur pierrier ça explose.
+// La PANNE est un ÉCHEC DE CHARGE: contrainte > résistance résiduelle
+// (usure + dispersion matérielle) — un organe neuf encaisse, un usé cède.
+function computeOrganLoads(car: CarState, seg: TerrainSegment, weather: string, darkness: number, v: number): Record<string, number> {
+  const mass = CAR_MASS_KG + car.fuel * 0.8;
+  const g = 9.81;
+  const cr = ROLLING_RES[seg.terrain] ?? 0.04;
+  const slopeFrac = seg.slope / 1000;
+  const weatherStress = WEATHER_STRESS[weather] ?? 1.0;
+  const vMs = v / 3.6;
+  const mu = LATERAL_GRIP[seg.terrain] ?? 0.5;
+  const fTraction = Math.min(
+    CAR_POWER_W * TRANSMISSION_EFF * (PACE_SPEED_FACTOR[car.pace] ?? 0.7) / Math.max(5, vMs),
+    0.9 * mu * mass * g
+  );
+  // charges calibrées pour un SUV de raid: la charge nominale représente
+  // ~80% du pire cas réaliste — en usage normal on vit à 0.4-0.8×nominale,
+  // les extrêmes (réception à 200 sur pierrier) dépassent 1×.
+  // charges par organe (N): le poids statique se répartit (4 roues, 4 jambe
+  // de suspension), le facteur de bosse et les chocs s'ajoutent en dynamique.
+  // Une jambe voit ~m·g/4 statique; en raid elle encaisse le double en bosse.
+  const statWheel = mass * g / 4;
+  const bumpFactor = 1 + Math.min(1.6, cr * 9) * Math.min(1, vMs / 33);
+  const shock = mass * (vMs * vMs) * cr * 0.00025;
+  return {
+    moteur: fTraction * weatherStress * (1 + darkness * 0.1),
+    transmission: fTraction * 1.05 * weatherStress,
+    pneus_av: (statWheel * bumpFactor + shock * 0.55) * weatherStress,
+    pneus_ar: (statWheel * bumpFactor + shock * 0.45 + fTraction * 0.12) * weatherStress,
+    suspensions: (statWheel * bumpFactor * 1.15 + shock) * weatherStress,
+    chassis: mass * g * 0.35 * bumpFactor + shock * 0.6,
+    freins: slopeFrac < 0 ? Math.abs(slopeFrac) * mass * g * 1.1 : mass * g * 0.04,
+    refroidissement: (fTraction * 0.55 + (weatherStress - 1) * 9000) * (seg.slope > 40 ? 1.3 : 1),
+  };
+}
+
 function wearUpdate(
   car: CarState,
   seg: TerrainSegment,
@@ -524,64 +564,90 @@ function wearUpdate(
   ctx: SimContext,
   emit: (t: string) => void
 ): void {
-  const terrainF = WEAR_TERRAIN_FACTOR[seg.terrain] ?? 1.3;
-  const slopeF = seg.slope > 0 ? 1 + seg.slope * 0.04 : 1;
-  const bump = (organ: OrganId, extra: number) => {
-    const weatherF = (WEAR_ORGAN_WEATHER[organ] ?? {})[weather] ?? 1;
-    const amount =
-      WEAR_PER_KM[organ] * terrainF * weatherF * slopeF * riskFactor * extra * distanceDelta;
+  const v = car.speedKmh;
+  const darkness = darknessFactor(ctx.hourOfDay(ctx.tick));
+  const loads = computeOrganLoads(car, seg, weather, darkness, v);
+  const dtH = TICK_SECONDS / 3600;
+  for (const organ of Object.keys(car.organs) as OrganId[]) {
+    const model = ORGAN_MODELS[organ];
+    if (!model) continue;
+    const load = loads[organ] ?? 0;
+    const ratio = load / model.nominalLoadN;
+    // loi d'endommagement: sous 0.5 de charge nominale, usure négligeable;
+    // au-dessus de 1, elle explose
+    const damage = model.damagePerHourAtNominal * Math.pow(ratio, model.expo) * dtH;
     const before = car.organs[organ];
-    let next = car.organs[organ] + amount;
+    let next = before + damage;
     if (car.crevaison && car.crevaisonOrgan === organ) next = Math.min(next, 90);
     car.organs[organ] = Math.min(100, next);
     if (before < 60 && car.organs[organ] >= 60) mental(car, ctx.tick, SYMPTOMS[organ].vague);
     if (before < 80 && car.organs[organ] >= 80) mental(car, ctx.tick, SYMPTOMS[organ].grave);
-    if (car.organs[organ] >= 100) breakOrgan(car, organ, ctx, emit);
-  };
-  bump("moteur", 1);
-  bump("transmission", 1);
-  bump("pneus_av", 1);
-  bump("pneus_ar", 1);
-  bump("suspensions", 1);
-  bump("chassis", 1);
-  bump("freins", seg.slope < -0.02 ? 2.5 : 1);
-  bump("refroidissement", 1);
+
+    // PANNE = ÉCHEC DE CHARGE (résistance résiduelle × dispersion matérielle)
+    // un organe déjà cassé (usure 100) ne re-déclenche pas la panne en boucle:
+    // la voiture est immobilisée, l'organe est mort.
+    if (car.organs[organ] < 99.5 && !car.immobilized) {
+      const strength = (1 - car.organs[organ] / 100) * model.nominalLoadN;
+      const scatter = 1 + (ctx.rng.next() - 0.5) * 2 * STRENGTH_SCATTER;
+      if (load > strength * scatter) {
+        breakOrgan(car, organ, ctx, emit);
+      }
+    }
+  }
   probabilisticFailure(car, ctx, emit);
 }
 
+// ACCIDENT ÉMERGENT: la demande latérale (v²/r) comparée à l'adhérence
+// disponible (μ_eff, dégradé par fatigue/nuit/météo). En dépassement, la
+// voiture part — probabilité proportionnelle à l'excès, pas un seuil binaire.
 function probabilisticFailure(car: CarState, ctx: SimContext, emit: (t: string) => void): void {
-  const perHour = TICK_SECONDS / 3600;
-  const riskAcc = RISK_ACCIDENT_FACTOR[car.risk];
-  for (const [organ, wear] of Object.entries(car.organs) as [OrganId, number][]) {
-    if (wear < 80) continue;
-    const p = perHour * (wear - 80) * BREAKDOWN_BASE_PER_HOUR * 5 * riskAcc;
-    if (ctx.rng.chance(p)) breakOrgan(car, organ, ctx, emit);
-  }
-  const accidentP = perHour * (car.fatigue > 70 ? (car.fatigue - 70) * ACCIDENT_FATIGUE_PER_HOUR : 0) * riskAcc;
-  if (ctx.rng.chance(accidentP)) {
-    car.stats.accidents++;
-    car.organs.chassis = Math.min(100, car.organs.chassis + 30);
-    if (car.organs.chassis >= 100) {
-      car.immobilized = true;
-      car.immobilizedReason = "accident";
-      car.speedKmh = 0;
-      emit(`${car.playerId} : accident grave (fatigue) — immobilisé !`);
-      mental(car, ctx.tick, "Impossible… j'ai tapé. La voiture ne bougera pas sans secours.");
-    } else {
-      mental(car, ctx.tick, "Grosse frayeur, j'ai fait une tête-à-queue. La caisse a tapé.");
+  const seg = segmentAt(ctx.world.segments, car.positionKm);
+  const weather = weatherAt(ctx.fronts, ctx.tick, car.positionKm);
+  const darkness = darknessFactor(ctx.hourOfDay(ctx.tick));
+  const curve = curvatureAt(ctx.world, car.positionKm);
+  const radius = curve > 0.001 ? 90 / curve : Infinity;
+  const mu = LATERAL_GRIP[seg.terrain] ?? 0.5;
+  // adhérence effective: fatigue (vigilance) + nuit + météo la dégradent — CONTINU
+  const vigueur = 1 - (car.fatigue / 100) * 0.35;
+  const muEff = mu * vigueur * (1 - darkness * 0.3) * (weather === "pluie_diluvienne" || weather === "tempete_sable" ? 0.6 : 1);
+  const vMs = car.speedKmh / 3.6;
+  // demande latérale vs capacité: l'excès est le moteur de l'accident
+  if (radius !== Infinity && car.speedKmh > 3) {
+    const demand = (vMs * vMs) / radius;
+    const capacity = muEff * 9.81;
+    const excess = (demand / capacity - 1) * RISK_ACCIDENT_FACTOR[car.risk];
+    if (excess > 0) {
+      const pPerTick = Math.min(0.5, excess * excess * 0.02);
+      if (ctx.rng.chance(pPerTick)) {
+        car.stats.accidents++;
+        const gravite = Math.min(1, excess / 2 + ctx.rng.next() * 0.3);
+        const dommage = gravite * (25 + ctx.rng.next() * 20);
+        car.organs.chassis = Math.min(100, car.organs.chassis + dommage);
+        if (car.organs.chassis >= 100) {
+          car.immobilized = true;
+          car.immobilizedReason = "accident";
+          car.speedKmh = 0;
+          emit(`${car.playerId} : accident grave (sortie de piste) — immobilisé !`);
+          mental(car, ctx.tick, "Impossible… je suis sorti. La voiture ne bougera pas sans secours.");
+        } else {
+          emit(`${car.playerId} : sortie de piste évitée de justesse (caisse touchée)`);
+          mental(car, ctx.tick, "Grosse frayeur, j'ai fait une tête-à-queue. La caisse a tapé.");
+        }
+      }
     }
   }
-  const terrain = segmentAt(ctx.world.segments, car.positionKm).terrain;
-  const terrainDebrisF = terrain === "pierrier" ? 3 : terrain === "regs" ? 2 : 1;
-  const rockP = perHour * DEBRIS_BASE_PER_HOUR * terrainDebrisF * riskAcc;
-  if (ctx.rng.chance(rockP)) {
+  // DÉBRIS: risque émergé = densité du terrain × vitesse (à 200 km/h sur
+  // pierrier, on en percute beaucoup plus qu'à 30 en steppe)
+  const debrisDensity = seg.terrain === "pierrier" ? 3 : seg.terrain === "regs" ? 2 : seg.terrain === "dunes" ? 1.2 : 1;
+  const rockP = (TICK_SECONDS / 3600) * debrisDensity * (vMs / 30) * (car.risk === "haut" ? 1.6 : car.risk === "bas" ? 0.6 : 1);
+  if (ctx.rng.chance(rockP * 0.012)) {
     if (ctx.rng.chance(0.5)) {
       car.crevaison = true;
       car.crevaisonOrgan = ctx.rng.chance(0.5) ? "pneus_av" : "pneus_ar";
       car.organs[car.crevaisonOrgan] = Math.max(car.organs[car.crevaisonOrgan], 85);
       mental(car, ctx.tick, "Un caillou ! Je sens comme une crevaison…");
     } else {
-      car.fatigue = Math.min(100, car.fatigue + 3);
+      car.fatigue = Math.min(100, car.fatigue + 2 + vMs / 20);
       mental(car, ctx.tick, "Un animal sur la piste ! Je l'ai évité de justesse.");
     }
   }
