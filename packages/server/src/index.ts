@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { RaceHost, RaceConfig } from "./host";
-import { CarState, PlayerRule, TICK_SECONDS, findContradictions } from "@vvr/engine";
+import { CarState, PlayerRule, TICK_SECONDS, findContradictions, weatherAt } from "@vvr/engine";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const SNAP_DIR = process.env.SNAP_DIR || path.join(process.cwd(), "data");
@@ -103,6 +103,7 @@ function stateMsg(forPlayerId: string | null): any {
     stopped: c.stopped,
     sleeping: c.sleeping > 0,
     stats: host.race.finished ? c.stats : null,
+    weather: weatherAt(host.race.fronts, host.race.tick, c.positionKm),
   }));
   const mine = forPlayerId ? cars.find((c) => c.playerId === forPlayerId) : undefined;
   return {

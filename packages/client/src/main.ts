@@ -11,6 +11,7 @@ interface CarPublic {
   immobilizedReason: string | null;
   stopped: boolean;
   sleeping: boolean;
+  weather: string;
   stats: { distance: number; maxSpeed: number; pannes: number; depenses: number; primes: number; accidents: number; depassements: number } | null;
 }
 
@@ -787,69 +788,281 @@ function altAt(km: number): number {
 }
 
 // ===== Rendu caméra =====
+let camZoom = 1;
+let lastFrame = 0;
+let dustParticles: { x: number; y: number; vx: number; vy: number; life: number }[] = [];
+let rainDrops: { x: number; y: number }[] = [];
+
+const WEATHER_FR: Record<string, string> = {
+  clair: "Ciel dégagé", pluie_diluvienne: "Pluie diluvienne", tempete_sable: "Tempête de sable",
+  canicule: "Canicule", froid_intense: "Froid intense", brouillard: "Brouillard dense",
+  vent_fort: "Vent latéral fort", grele: "Grêle / orage",
+};
+const WEATHER_ICON: Record<string, string> = {
+  clair: "☀️", pluie_diluvienne: "🌧️", tempete_sable: "🌪️", canicule: "🥵",
+  froid_intense: "❄️", brouillard: "🌫️", vent_fort: "💨", grele: "⛈️",
+};
+
+cv.addEventListener("wheel", (e) => {
+  camZoom = Math.max(0.6, Math.min(1.6, camZoom * (e.deltaY > 0 ? 0.92 : 1.08)));
+});
+
 function render(): void {
   requestAnimationFrame(render);
+  const now = performance.now();
+  const dt = Math.min(0.1, (now - lastFrame) / 1000);
+  lastFrame = now;
   if (!state) return;
   const w = (cv.width = cv.clientWidth);
   const h = (cv.height = cv.clientHeight);
   const car = myCar();
-  const seg = state.world.segments[Math.min(state.world.segments.length - 1, Math.floor((car?.positionKm ?? 0) / 25))];
-  ctx.fillStyle = BIOME_COLORS[seg?.biome ?? "steppe"];
-  ctx.fillRect(0, 0, w, h);
+  const myPub = state.cars.find((c) => c.playerId === myId);
+  const km = myPub?.positionKm ?? 0;
+  const seg = state.world.segments[Math.min(state.world.segments.length - 1, Math.floor(km / 25))];
+  const weather = myPub?.weather ?? "clair";
+  const hour = hourOfDay(state.tick);
+  const dark = hour >= 21 || hour < 5 ? 0.75 : hour >= 19 ? ((hour - 19) / 2) * 0.75 : hour < 7 ? ((7 - hour) / 2) * 0.75 : 0;
 
-  // relief ombré simple
-  ctx.fillStyle = "rgba(0,0,0,0.08)";
-  for (let i = 0; i < 6; i++) {
+  ctx.save();
+  ctx.translate(w / 2, h * 0.55);
+  ctx.scale(camZoom, camZoom);
+  ctx.translate(-w / 2, -h * 0.55);
+
+  // sol — teinte dominante par biome
+  ctx.fillStyle = BIOME_COLORS[seg?.biome ?? "steppe"];
+  ctx.fillRect(-w, -h, w * 3, h * 3);
+
+  // relief ombré (hillshading stylisé) + végétation/rochers déterministes
+  const seedR = (n: number) => {
+    const x = Math.sin(n * 127.1 + km * 0.7) * 43758.5453;
+    return x - Math.floor(x);
+  };
+  for (let i = 0; i < 7; i++) {
+    const bx = (i * w) / 6 - w * 0.08;
+    const bh = h * (0.12 + seedR(i + 1) * 0.22);
+    ctx.fillStyle = "rgba(0,0,0,0.09)";
     ctx.beginPath();
-    ctx.moveTo(i * w / 6, h * 0.3);
-    ctx.quadraticCurveTo(i * w / 6 + w / 12, h * (0.1 + (i % 3) * 0.08), (i + 1) * w / 6, h * 0.3);
+    ctx.moveTo(bx - w * 0.1, h * 0.42);
+    ctx.quadraticCurveTo(bx + w * 0.09, h * 0.42 - bh, bx + w * 0.28, h * 0.42);
+    ctx.fill();
+  }
+  for (let i = 0; i < 14; i++) {
+    const ox = seedR(i + 40) * w;
+    const oy = h * 0.45 + seedR(i + 60) * h * 0.5;
+    if (seedR(i + 100) < 0.45) {
+      // rocher
+      ctx.fillStyle = "rgba(90,80,65,0.8)";
+      ctx.beginPath();
+      ctx.ellipse(ox, oy, 5 + seedR(i) * 9, 4 + seedR(i + 7) * 6, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (seg?.biome === "steppe" || seg?.biome === "humide") {
+      // végétation
+      ctx.fillStyle = seg.biome === "humide" ? "rgba(40,90,50,0.7)" : "rgba(70,110,50,0.6)";
+      ctx.beginPath();
+      ctx.ellipse(ox, oy, 6 + seedR(i) * 6, 5 + seedR(i + 3) * 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  // animal occasionnel
+  if (seedR(Math.floor(now / 8000)) < 0.25) {
+    const ax = w * 0.15 + seedR(Math.floor(now / 8000) + 1) * w * 0.7;
+    ctx.fillStyle = "rgba(120,90,60,0.85)";
+    ctx.beginPath();
+    ctx.ellipse(ax, h * 0.78, 10, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(ax + 11, h * 0.78 - 3, 4, 3.5, 0, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // piste
-  ctx.strokeStyle = "#6b5b43";
-  ctx.lineWidth = 34;
+  // piste (largeur selon seg.width) + traînée GPS
+  const roadW = seg?.width === "etroite" ? 26 : seg?.width === "moyenne" ? 36 : 48;
+  ctx.strokeStyle = "rgba(107,91,67,0.95)";
+  ctx.lineWidth = roadW;
   ctx.beginPath();
   ctx.moveTo(0, h * 0.7);
   ctx.bezierCurveTo(w * 0.3, h * 0.58, w * 0.6, h * 0.78, w, h * 0.62);
   ctx.stroke();
+  ctx.strokeStyle = "rgba(0,0,0,0.12)";
+  ctx.lineWidth = roadW * 0.18;
+  ctx.setLineDash([12, 16]);
+  ctx.stroke();
+  ctx.setLineDash([]);
 
-  // voitures proches visibles
-  const cx = w / 2, cy = h * 0.68;
-  const drawCar = (x: number, y: number, color: string, label?: string) => {
-    ctx.fillStyle = "rgba(0,0,0,0.2)";
+  // bornes kilométriques + panneaux de station/village proches
+  ctx.font = "10px sans-serif";
+  const nextBorne = Math.ceil(km / 10) * 10;
+  for (let b = -2; b <= 2; b++) {
+    const bkm = nextBorne + b * 10;
+    if (bkm < 0) continue;
+    const rel = bkm - km;
+    if (Math.abs(rel) > 0.35) continue;
+    const bx = w / 2 + (rel / 0.35) * w * 0.42;
+    ctx.fillStyle = "#efe8dc";
+    ctx.fillRect(bx - 1, h * 0.7 - 14, 2, 14);
+    ctx.fillStyle = "#3a332a";
+    ctx.fillText(`${bkm}`, bx - 10, h * 0.7 - 17);
+  }
+  for (const st of state.world.stations) {
+    const rel = st.km - km;
+    if (rel > -0.05 && rel < 0.35) {
+      const sx = w / 2 + (rel / 0.35) * w * 0.42;
+      ctx.font = "14px sans-serif";
+      ctx.fillStyle = "#fff";
+      ctx.fillText("⛽", sx, h * 0.7 - 26);
+      if (st.hasHotel) ctx.fillText("🏨", sx + 16, h * 0.7 - 26);
+      ctx.font = "10px sans-serif";
+    }
+  }
+
+  // voitures proches visibles concrètement
+  const cx = w / 2, cy = h * 0.7;
+  const drawCar = (x: number, y: number, color: string, label: string | undefined, moving: boolean) => {
+    const bounce = moving ? Math.sin(now / 90 + x) * 1.5 : 0;
+    // ombre
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
     ctx.beginPath();
-    ctx.ellipse(x, y + 12, 26, 8, 0, 0, Math.PI * 2);
+    ctx.ellipse(x, y + 13, 27, 8, 0, 0, Math.PI * 2);
     ctx.fill();
+    // roues animées (rotation suggérée par bandes)
+    ctx.fillStyle = "#1a1a1a";
+    for (const wx of [x - 27, x - 19, x + 19, x + 27]) {
+      ctx.fillRect(wx, y - 9 + bounce, 8, 18);
+      if (moving) {
+        ctx.fillStyle = "#555";
+        const spin = Math.sin(now / 60 + wx) * 6;
+        ctx.fillRect(wx, y - 4 + bounce + spin * 0.4, 8, 3);
+        ctx.fillStyle = "#1a1a1a";
+      }
+    }
+    // caisse
     ctx.fillStyle = color;
-    ctx.fillRect(x - 24, y - 14, 48, 24);
-    ctx.fillStyle = "#222";
-    ctx.fillRect(x - 28, y - 10, 6, 12);
-    ctx.fillRect(x + 22, y - 10, 6, 12);
-    ctx.fillRect(x - 28, y + 6, 6, 12);
-    ctx.fillRect(x + 22, y + 6, 6, 12);
+    ctx.fillRect(x - 24, y - 14 + bounce, 48, 24);
+    ctx.fillStyle = "rgba(0,0,0,0.15)";
+    ctx.fillRect(x - 24, y + 4 + bounce, 48, 6);
     ctx.fillStyle = "#9cf";
-    ctx.fillRect(x - 14, y - 8, 20, 10);
+    ctx.fillRect(x - 14, y - 9 + bounce, 20, 9);
     if (label) {
       ctx.fillStyle = "#fff";
-      ctx.font = "12px sans-serif";
-      ctx.fillText(label, x - 20, y - 22);
+      ctx.font = "11px sans-serif";
+      ctx.fillText(label, x - 18, y - 22 + bounce);
     }
   };
 
-  const myPub = state.cars.find((c) => c.playerId === myId);
   if (myPub) {
     for (const c of state.cars) {
       if (c.playerId === myId) continue;
       const gap = c.positionKm - myPub.positionKm;
-      if (Math.abs(gap) < 0.4) {
-        const rel = gap / 0.4;
-        drawCar(cx + rel * w * 0.35, cy - 20, c.color, state.players.find((p) => p.id === c.playerId)?.pseudo);
+      if (Math.abs(gap) < 0.35) {
+        const rel = gap / 0.35;
+        drawCar(cx + rel * w * 0.35, cy - 14, c.color, state.players.find((p) => p.id === c.playerId)?.pseudo, c.speedKmh > 2);
       }
     }
-    drawCar(cx, cy, myPub.color);
-    if (myPub.crevaisonFlag) { /* placeholder */ }
+    drawCar(cx, cy, myPub.color, undefined, myPub.speedKmh > 2);
+    // état au-dessus de ma voiture
+    if (myPub.immobilized) {
+      ctx.fillStyle = "#e66";
+      ctx.font = "bold 13px sans-serif";
+      ctx.fillText("⚠ " + (myPub.immobilizedReason ?? ""), cx - 60, cy - 32);
+    } else if (myPub.sleeping) {
+      ctx.fillStyle = "#ccc";
+      ctx.font = "13px sans-serif";
+      ctx.fillText("💤 bivouac / repos en cours", cx - 70, cy - 32);
+    }
+
+    // poussière derrière la voiture en mouvement
+    if (myPub.speedKmh > 5) {
+      if (dustParticles.length < 40 && Math.random() < 0.5) {
+        dustParticles.push({ x: cx - 30, y: cy + 6, vx: -30 - Math.random() * 40, vy: -10 + Math.random() * 20, life: 1 });
+      }
+      for (const p of dustParticles) {
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.life -= dt * 1.4;
+        ctx.fillStyle = `rgba(180,160,120,${Math.max(0, p.life) * 0.5})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 3 + (1 - p.life) * 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      dustParticles = dustParticles.filter((p) => p.life > 0);
+    }
   }
+
+  // nuit : voile sombre + cône de phares
+  if (dark > 0.05) {
+    ctx.fillStyle = `rgba(10,10,30,${dark})`;
+    ctx.fillRect(-w, -h, w * 3, h * 3);
+    const grad = ctx.createRadialGradient(cx + 55, cy, 8, cx + 55, cy, 130 * camZoom);
+    grad.addColorStop(0, "rgba(255,240,170,0.4)");
+    grad.addColorStop(1, "rgba(255,240,170,0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(cx + 18, cy - 6);
+    ctx.lineTo(cx + 250 * camZoom, cy - 75 * camZoom);
+    ctx.lineTo(cx + 250 * camZoom, cy + 65 * camZoom);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // météo visible en course
+  if (weather === "pluie_diluvienne" || weather === "grele") {
+    if (rainDrops.length < 120) for (let i = 0; i < 6; i++) rainDrops.push({ x: Math.random() * w, y: Math.random() * h });
+    ctx.strokeStyle = weather === "grele" ? "rgba(220,230,255,0.7)" : "rgba(160,190,230,0.6)";
+    ctx.lineWidth = weather === "grele" ? 2.5 : 1.2;
+    for (const d of rainDrops) {
+      d.y += (weather === "grele" ? 300 : 480) * dt;
+      d.x -= 60 * dt;
+      ctx.beginPath();
+      ctx.moveTo(d.x, d.y);
+      ctx.lineTo(d.x - 3, d.y + 10);
+      ctx.stroke();
+      if (d.y > h) { d.y = -10; d.x = Math.random() * (w * 1.1); }
+    }
+    if (weather === "grele" && Math.random() < 0.008) {
+      ctx.fillStyle = "rgba(255,255,200,0.9)";
+      ctx.fillRect(0, 0, w, h);
+    }
+  } else rainDrops = [];
+  if (weather === "tempete_sable") {
+    ctx.fillStyle = "rgba(190,150,90,0.35)";
+    ctx.fillRect(-w, -h, w * 3, h * 3);
+    for (let i = 0; i < 40; i++) {
+      const sx = ((now / 8 + i * 97) % (w + 100)) - 50;
+      const sy = (i * 53) % h;
+      ctx.fillStyle = "rgba(220,190,130,0.5)";
+      ctx.fillRect(sx + (now / 3) % 30, sy, 14, 2);
+    }
+  }
+  if (weather === "brouillard") {
+    ctx.fillStyle = "rgba(200,200,200,0.35)";
+    ctx.fillRect(-w, -h, w * 3, h * 3);
+  }
+  if (weather === "canicule") {
+    const hg = ctx.createLinearGradient(0, 0, 0, h);
+    hg.addColorStop(0, "rgba(255,180,80,0.15)");
+    hg.addColorStop(1, "rgba(255,180,80,0)");
+    ctx.fillStyle = hg;
+    ctx.fillRect(-w, -h, w * 3, h * 3);
+  }
+  if (weather === "froid_intense") {
+    ctx.fillStyle = "rgba(180,200,255,0.12)";
+    ctx.fillRect(-w, -h, w * 3, h * 3);
+  }
+
+  ctx.restore();
+
+  // HUD caméra : bandeau bas avec vitesse, allure, météo locale
+  ctx.fillStyle = "rgba(30,26,20,0.75)";
+  ctx.fillRect(0, h - 30, w, 30);
+  ctx.fillStyle = "#efe8dc";
+  ctx.font = "13px sans-serif";
+  const spd = myPub?.speedKmh ?? 0;
+  ctx.fillText(`${spd.toFixed(0)} km/h`, 12, h - 11);
+  ctx.fillText(`${WEATHER_ICON[weather] ?? ""} ${WEATHER_FR[weather] ?? weather}`, 100, h - 11);
+  ctx.fillText(`${(myPub?.positionKm ?? 0).toFixed(1)} km`, w - 110, h - 11);
+  // météo aussi dans le bandeau haut
+  const wx = $("weather");
+  if (wx) wx.textContent = `${WEATHER_ICON[weather] ?? ""} ${WEATHER_FR[weather] ?? ""}`;
 
   if (state.paused || !state.started) {
     ctx.fillStyle = "rgba(0,0,0,0.55)";
@@ -858,6 +1071,8 @@ function render(): void {
     ctx.font = "16px sans-serif";
     ctx.fillText(state.paused ? "⏸ Course en pause — éditez vos règles librement" : "⏳ En attente du départ…", 12, 26);
   }
+
+  updateAudio(myPub, weather, dark);
 }
 
 // ===== Admin =====
@@ -901,6 +1116,63 @@ $("btn-map").onclick = openMap;
 $("btn-results").onclick = openResults;
 $("btn-planner").onclick = openPlanner;
 $("btn-close").onclick = closeFullscreen;
+
+// ===== Ambiance sonore (WebAudio procédural, sans fichiers) =====
+let audioCtx: AudioContext | null = null;
+let engineOsc: OscillatorNode | null = null;
+let engineGain: GainNode | null = null;
+let windGain: GainNode | null = null;
+let soundOn = false;
+
+function startAudio(): void {
+  if (audioCtx) return;
+  audioCtx = new AudioContext();
+  // moteur : oscillateur grave dont la fréquence suit la vitesse
+  engineGain = audioCtx.createGain();
+  engineGain.gain.value = 0;
+  engineGain.connect(audioCtx.destination);
+  engineOsc = audioCtx.createOscillator();
+  engineOsc.type = "sawtooth";
+  engineOsc.frequency.value = 55;
+  engineOsc.connect(engineGain);
+  engineOsc.start();
+  // vent : bruit blanc filtré
+  const bufferSize = 2 * audioCtx.sampleRate;
+  const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = noiseBuffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = noiseBuffer;
+  noise.loop = true;
+  const windFilter = audioCtx.createBiquadFilter();
+  windFilter.type = "lowpass";
+  windFilter.frequency.value = 400;
+  windGain = audioCtx.createGain();
+  windGain.gain.value = 0;
+  noise.connect(windFilter).connect(windGain).connect(audioCtx.destination);
+  noise.start();
+}
+
+function updateAudio(myPub: CarPublic | undefined, weather: string, dark: number): void {
+  if (!soundOn || !audioCtx || !engineOsc || !engineGain || !windGain) return;
+  const speed = myPub?.speedKmh ?? 0;
+  engineOsc.frequency.value = 45 + (speed / 100) * 110;
+  engineGain.gain.value = speed > 1 ? 0.05 : 0.02;
+  const storm = weather === "tempete_sable" || weather === "pluie_diluvienne" || weather === "grele" || weather === "vent_fort";
+  windGain.gain.value = (storm ? 0.09 : 0.02) + dark * 0.02;
+}
+
+$("btn-sound").addEventListener("click", () => {
+  soundOn = !soundOn;
+  $("btn-sound").textContent = soundOn ? "🔇 Muet" : "🔊 Son";
+  if (soundOn) {
+    startAudio();
+    audioCtx?.resume();
+  } else if (audioCtx) {
+    engineGain!.gain.value = 0;
+    windGain!.gain.value = 0;
+  }
+});
 
 connect();
 render();
