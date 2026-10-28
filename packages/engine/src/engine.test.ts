@@ -60,9 +60,12 @@ test("vitesse: pénalité nuit et fatigue", () => {
   assert.ok(vTired < vDay);
 });
 
-test("règles par défaut présentes (canaux 1-4)", () => {
-  assert.equal(DEFAULT_RULES.length, 4);
-  assert.deepEqual(DEFAULT_RULES.map((r) => r.channel), [1, 2, 3, 4]);
+test("règles par défaut présentes (canaux 1-5)", () => {
+  assert.equal(DEFAULT_RULES.length, 5);
+  assert.deepEqual(DEFAULT_RULES.map((r) => r.channel), [1, 2, 3, 4, 5]);
+  // canal 5: allure normale par défaut (le pilote roule en normale d'office)
+  assert.equal(DEFAULT_RULES[4].action.kind, "allure");
+  assert.equal((DEFAULT_RULES[4].action as any).level, "normale");
 });
 
 test("race: départ décalé et classement compensé", () => {
@@ -98,7 +101,9 @@ test("course: voiture sans règle avance en allure prudente", () => {
   for (let i = 0; i < 3600 * 30; i++) race.step();
   const car = race.cars[0];
   assert.ok(car.positionKm > 10, `position=${car.positionKm}`);
-  assert.equal(car.pace, "prudente");
+  // la règle par défaut N\u00b05 impose allure normale; si le joueur la
+  // désactive/supprime, le fallback prudent tient (doc \u00a75)
+  assert.equal(car.pace, "normale");
 });
 
 test("immobilisation: camion appelable, 6h puis remorquage", () => {

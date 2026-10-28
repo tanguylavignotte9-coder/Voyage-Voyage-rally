@@ -139,6 +139,17 @@ export const DEFAULT_RULES: PlayerRule[] = [
     effect: { kind: "default" },
     mode: "persistante",
   },
+  {
+    // N°5: allure normale par défaut — le pilote roule à allure normale tant
+    // qu'aucune autre consigne d'allure ne s'applique (le n° le plus bas gagne:
+    // toute règle d'allure plus basse dans la numérotation prendra la main).
+    channel: 5,
+    enabled: true,
+    conditions: [],
+    action: { kind: "allure", level: "normale" },
+    effect: { kind: "default" },
+    mode: "persistante",
+  },
 ];
 
 export interface StationWork {
