@@ -273,73 +273,68 @@ export class WorldGenerator {
     }
     wpts.push({ x: end.x, y: end.y });
 
-    // --- niveau 2: le guide entre waypoints ---
-    // INVARIANT: chaque pas se rapproche du waypoint actif. Le relief choisit
-    // seulement COMMENT (serpenter dans les vallées, éviter le mauvais sol).
-    // Les virages sont la conséquence mesurée du terrain — pas un tirage.
+    // --- niveau 2: le guide suit un CAP SINUEUX (le tracé vit) ---
+    // Conception: le cap désiré = direction waypoint + SERPENTEMENT (bruit
+    // multi-échelle fonction de l'ARC, calibré par biome). Le guide POURSUIT
+    // ce cap — la pente et le sol ne sont que des VETOS (on évite le
+    // franchissable-impossible), jamais des critères lissants qui tueraient
+    // les virages en moyennant. Les virages sont dans le cap lui-même.
     let x = 0, y = 0;
     let heading = 0;
     let km = 0;
     let wpIdx = 1;
 
+    const capAmp = (b: Biome): number =>
+      b === "montagne" ? 0.95 : b === "humide" ? 0.65 : b === "desert" ? 0.5 : 0.25;
+
     while (Math.hypot(end.x - x, end.y - y) > 2500 && this.points.length < (totalM / STEP_M) * 2.2) {
       const step = STEP_M;
       const biome = this.biomeAt(km);
       const cfg = BIOME_RELIEF[biome];
-      const altHere = this.altAt(x, y);
 
       // waypoint actif
       while (wpIdx < wpts.length - 1 && Math.hypot(wpts[wpIdx].x - x, wpts[wpIdx].y - y) < 2000) wpIdx++;
       const wp = wpts[Math.min(wpIdx, wpts.length - 1)];
       const toWp = Math.atan2(wp.y - y, wp.x - x);
-      // SERPENTEMENT du conducteur: bruit de cap à l'échelle du virage (250 m
-      // de longueur d'onde), calibré par biome. Ce n'est pas un tirage de
-      // virage: c'est le comportement d'une piste qui ondule autour de son
-      // objectif — borné par l'attraction (jamais de divergence).
-      const wind = (this.detailNoise.fbm(km * 1000, km * 260, 240, 2) - 0.5) * 2
-        * (biome === "montagne" ? 0.85 : biome === "steppe" ? 0.22 : biome === "humide" ? 0.55 : 0.4);
-      const desiredBase = toWp + wind;
 
-      // 7 options autour du cap courant; seules celles qui PROGRESSENT comptent
-      let bestCost = Infinity;
-      let bestHeading = toWp;
-      let anyValid = false;
-      for (let i = -3; i <= 3; i++) {
-        const cand = heading + i * (Math.PI / 9);
-        const px = x + Math.cos(cand) * step;
-        const py = y + Math.sin(cand) * step;
-        anyValid = true;
-        // coût relief
-        const altThere = this.altAt(px, py);
-        const slope = Math.abs(altThere - altHere) / step;
-        const costSlope = slope > cfg.maxSlope ? 30 + (slope - cfg.maxSlope) * 90 : slope * 6.0;
+      // CAP SINUEUX: bruit d'arc à 2 échelles — grande ondulation (2 km) +
+      // virages (250 m). C'est le bruit qui FAIT la route: amplitude 0.25 rad
+      // (steppe) à 0.95 rad (montagne, épingles).
+      const arcM = km * 1000;
+      // 3 échelles: l'ondulation de l'itinéraire (2 km), le virage (300 m),
+      // et le détail VISIBLE à la caméra (100 m) — sans lui, la route paraît
+      // droite localement même quand elle tourne globalement.
+      const windBig = (this.detailNoise.fbm(arcM, 0, 1900, 2) - 0.5) * 2;
+      const windSmall = (this.detailNoise.fbm(0, arcM, 300, 2) - 0.5) * 2;
+      const windFast = (this.detailNoise.fbm(arcM, arcM, 95, 2) - 0.5) * 2;
+      const wind = (windBig * 0.5 + windSmall * 0.45 + windFast * 0.4) * capAmp(biome);
+      let desired = toWp + wind;
+
+      // VETO relief: si le cap désiré monte trop ou traverse du mauvais sol,
+      // on le décale par petits pas vers la première option franchissable.
+      const altHere = this.altAt(x, y);
+      const probe = (c: number) => {
+        const px = x + Math.cos(c) * step * 2;
+        const py = y + Math.sin(c) * step * 2;
+        const slope = Math.abs(this.altAt(px, py) - altHere) / (step * 2);
         const wet = this.wetnessAt(px, py);
-        const costWet = Math.max(0, wet - 0.5) * cfg.costWet * 8;
-        let dHead = cand - heading;
-        while (dHead > Math.PI) dHead -= 2 * Math.PI;
-        while (dHead < -Math.PI) dHead += 2 * Math.PI;
-        const costInertia = Math.abs(dHead) * 0.8;
-        // attraction vers le cap sinueux — douce près du cap, DURE au-delà
-        // de ~0.4 rad (le serpentement ne fait jamais quitter l'itinéraire)
-        let derr = cand - desiredBase;
-        while (derr > Math.PI) derr -= 2 * Math.PI;
-        while (derr < -Math.PI) derr += 2 * Math.PI;
-        let derrWp = cand - toWp;
-        while (derrWp > Math.PI) derrWp -= 2 * Math.PI;
-        while (derrWp < -Math.PI) derrWp += 2 * Math.PI;
-        const costTarget =
-          Math.pow(Math.abs(derr) / 0.6, 2) * 0.5 +
-          Math.pow(Math.max(0, Math.abs(derrWp) - 0.45) / 0.4, 3) * 60;
-        const cost = costSlope + costWet + costInertia + costTarget;
-        if (cost < bestCost) { bestCost = cost; bestHeading = cand; }
+        return slope <= cfg.maxSlope * 1.15 && wet < 0.78;
+      };
+      if (!probe(desired)) {
+        let found = false;
+        for (let dv = 0.17; dv <= 1.2; dv += 0.17) {
+          if (probe(desired + dv)) { desired += dv; found = true; break; }
+          if (probe(desired - dv)) { desired -= dv; found = true; break; }
+        }
+        if (!found) desired = toWp; // franchir quand même (ralenti par la pente en sim)
       }
-      if (!anyValid) bestHeading = toWp;
 
-      // rotation limitée
-      let turn = bestHeading - heading;
+      // rotation limitée: une vraie piste tourne franchement (jusqu'à 35°/20m
+      // dans une épingle) mais pas instantanément
+      let turn = desired - heading;
       while (turn > Math.PI) turn -= 2 * Math.PI;
       while (turn < -Math.PI) turn += 2 * Math.PI;
-      const maxTurn = (Math.PI / 6) * (step / 20);
+      const maxTurn = 0.60 * (step / 20); // ~35° par pas
       turn = Math.max(-maxTurn, Math.min(maxTurn, turn));
       heading += turn;
       const curvature = turn / step;

@@ -95,6 +95,11 @@ function connect(): void {
     const msg = JSON.parse(ev.data);
     if (msg.type === "path_chunk") {
       pathChunks.set(msg.fromKm, msg.points);
+      // purge: garder une fenêtre glissante (max 40 chunks = 80 km)
+      if (pathChunks.size > 40) {
+        const keys = [...pathChunks.keys()].sort((a, b) => Math.abs(a - lastKnownKm) - Math.abs(b - lastKnownKm));
+        while (pathChunks.size > 40) pathChunks.delete(keys.pop()!);
+      }
       return;
     }
     if (msg.type === "state") {
