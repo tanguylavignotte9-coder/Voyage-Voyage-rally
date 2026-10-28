@@ -159,7 +159,7 @@ export class WorldGenerator {
     // converge vers la longueur cible — calibration itérative: on trace une
     // première fois, on mesure le ratio arc/vol-d'oiseau, on replace B.
     // (le sinueux émergent d'une piste fait 1,2-1,4× le vol d'oiseau)
-    this.endX = this.totalKm * 1000 * 0.72;
+    this.endX = this.totalKm * 1000 * 0.5;
     this.endY = this.rng.range(-0.15, 0.15) * this.endX;
 
     this.buildPath();
@@ -181,6 +181,8 @@ export class WorldGenerator {
     const b = this.biomeAt(km);
     return b === "steppe" ? 0.35 : b === "montagne" ? 1.4 : b === "humide" ? 1.0 : 0.8;
   }
+
+  private cfgOf(b: Biome): BiomeRelief { return BIOME_RELIEF[b]; }
 
   biomeAt(km: number): Biome {
     for (const z of this.biomeZones) if (km >= z.startKm && km < z.endKm) return z.biome;
@@ -284,60 +286,99 @@ export class WorldGenerator {
     let km = 0;
     let wpIdx = 1;
 
-    const capAmp = (b: Biome): number =>
-      b === "montagne" ? 0.95 : b === "humide" ? 0.65 : b === "desert" ? 0.5 : 0.25;
+    // ===== MACHINE À ÉTATS DE CONDUITE: le rythme d'une vraie spéciale =====
+    // DROITE (cap verrouillé, la route va droit) -> CLOTHOÏDE (la courbure
+    // monte progressivement) -> VIRAGE (arc de rayon franc, constant) ->
+    // CLOTHOÏDE (la courbure retombe) -> DROITE... Distribution BIMODALE:
+    // pas d'ondulation continue molle, un enchaînement droites/virages nets.
+    // Le tirage des virages (fréquence, rayon, déflexion) suit le biome:
+    // montagne = serré et fréquent, steppe = rare et ouvert.
+    const PACE = {
+      montagne: { straightMin: 40, straightMax: 260, radiusMin: 25, radiusMax: 70, turnChance: 0.8, hairpinChance: 0.22 },
+      humide:   { straightMin: 60, straightMax: 300, radiusMin: 30, radiusMax: 90, turnChance: 0.65, hairpinChance: 0.12 },
+      desert:   { straightMin: 80, straightMax: 500, radiusMin: 45, radiusMax: 140, turnChance: 0.55, hairpinChance: 0.06 },
+      steppe:   { straightMin: 200, straightMax: 1400, radiusMin: 80, radiusMax: 260, turnChance: 0.4, hairpinChance: 0.02 },
+    } as const;
+
+    type Phase = { kind: "straight" | "entry" | "turn" | "exit"; remaining: number; targetCurv: number; turnLen: number };
+    let phase: Phase = { kind: "straight", remaining: this.rng.range(60, 200), targetCurv: 0, turnLen: 0 };
+    let curv = 0;      // courbure courante (lissée par les clothoïdes)
+    let turnSign = 1;
+
+    const newStraight = (b: Biome): number => this.rng.range(PACE[b].straightMin, PACE[b].straightMax);
 
     while (Math.hypot(end.x - x, end.y - y) > 2500 && this.points.length < (totalM / STEP_M) * 2.2) {
       const step = STEP_M;
       const biome = this.biomeAt(km);
-      const cfg = BIOME_RELIEF[biome];
+      const pace = PACE[biome];
 
-      // waypoint actif
+      // waypoint actif (direction générale)
       while (wpIdx < wpts.length - 1 && Math.hypot(wpts[wpIdx].x - x, wpts[wpIdx].y - y) < 2000) wpIdx++;
       const wp = wpts[Math.min(wpIdx, wpts.length - 1)];
       const toWp = Math.atan2(wp.y - y, wp.x - x);
 
-      // CAP SINUEUX: bruit d'arc à 2 échelles — grande ondulation (2 km) +
-      // virages (250 m). C'est le bruit qui FAIT la route: amplitude 0.25 rad
-      // (steppe) à 0.95 rad (montagne, épingles).
-      const arcM = km * 1000;
-      // 3 échelles: l'ondulation de l'itinéraire (2 km), le virage (300 m),
-      // et le détail VISIBLE à la caméra (100 m) — sans lui, la route paraît
-      // droite localement même quand elle tourne globalement.
-      const windBig = (this.detailNoise.fbm(arcM, 0, 1900, 2) - 0.5) * 2;
-      const windSmall = (this.detailNoise.fbm(0, arcM, 300, 2) - 0.5) * 2;
-      const windFast = (this.detailNoise.fbm(arcM, arcM, 95, 2) - 0.5) * 2;
-      const wind = (windBig * 0.5 + windSmall * 0.45 + windFast * 0.4) * capAmp(biome);
-      let desired = toWp + wind;
-
-      // VETO relief: si le cap désiré monte trop ou traverse du mauvais sol,
-      // on le décale par petits pas vers la première option franchissable.
-      const altHere = this.altAt(x, y);
-      const probe = (c: number) => {
-        const px = x + Math.cos(c) * step * 2;
-        const py = y + Math.sin(c) * step * 2;
-        const slope = Math.abs(this.altAt(px, py) - altHere) / (step * 2);
-        const wet = this.wetnessAt(px, py);
-        return slope <= cfg.maxSlope * 1.15 && wet < 0.78;
-      };
-      if (!probe(desired)) {
-        let found = false;
-        for (let dv = 0.17; dv <= 1.2; dv += 0.17) {
-          if (probe(desired + dv)) { desired += dv; found = true; break; }
-          if (probe(desired - dv)) { desired -= dv; found = true; break; }
+      // --- avancer la machine d'états ---
+      phase.remaining -= step;
+      if (phase.remaining <= 0) {
+        if (phase.kind === "straight") {
+          // tirer un virage? (fréquence par biome)
+          if (this.rng.chance(pace.turnChance)) {
+            // rayon franc + déflexion; l'épingle élargit la déflexion
+            const radius = this.rng.range(pace.radiusMin, pace.radiusMax);
+            let defl = this.rng.range(0.45, 1.75); // 25°-100°
+            if (this.rng.chance(pace.hairpinChance)) defl = this.rng.range(1.9, Math.PI * 0.98); // épingle 110-177°
+            turnSign = this.rng.chance(0.5) ? 1 : -1;
+            // biais: le virage tourne de préférence vers le waypoint
+            let err = toWp - heading;
+            while (err > Math.PI) err -= 2 * Math.PI;
+            while (err < -Math.PI) err += 2 * Math.PI;
+            if (Math.abs(err) > 0.25) turnSign = err > 0 ? 1 : -1;
+            const target = (1 / radius) * turnSign;
+            const clothLen = 40; // 40 m d'entrée/sortie
+            phase = { kind: "entry", remaining: clothLen, targetCurv: target, turnLen: Math.max(clothLen * 2, radius * defl) };
+          } else {
+            phase.remaining = newStraight(biome);
+          }
+        } else if (phase.kind === "entry") {
+          phase = { kind: "turn", remaining: phase.turnLen, targetCurv: phase.targetCurv, turnLen: phase.turnLen };
+        } else if (phase.kind === "turn") {
+          phase = { kind: "exit", remaining: 40, targetCurv: 0, turnLen: 0 };
+        } else {
+          phase = { kind: "straight", remaining: newStraight(biome), targetCurv: 0, turnLen: 0 };
         }
-        if (!found) desired = toWp; // franchir quand même (ralenti par la pente en sim)
+      }
+      // DÉRIVE CONTRÔLÉE: pendant les droites, une correction douce aligne le
+      // cap sur le waypoint (les virages jouent, l'itinéraire ne diverge pas).
+      if (phase.kind === "straight") {
+        let err = toWp - heading;
+        while (err > Math.PI) err -= 2 * Math.PI;
+        while (err < -Math.PI) err += 2 * Math.PI;
+        heading += err * 0.035; // doux mais tient B sur les droites
       }
 
-      // rotation limitée: une vraie piste tourne franchement (jusqu'à 35°/20m
-      // dans une épingle) mais pas instantanément
-      let turn = desired - heading;
-      while (turn > Math.PI) turn -= 2 * Math.PI;
-      while (turn < -Math.PI) turn += 2 * Math.PI;
-      const maxTurn = 0.60 * (step / 20); // ~35° par pas
-      turn = Math.max(-maxTurn, Math.min(maxTurn, turn));
-      heading += turn;
-      const curvature = turn / step;
+      // --- courbure de la phase (clothoïdes = montée/descente progressive) ---
+      const ease = 0.18 + 0.82 * Math.min(1, step / 25);
+      if (phase.kind === "straight") curv = curv * (1 - ease);
+      else if (phase.kind === "entry") curv += (phase.targetCurv - curv) * ease;
+      else if (phase.kind === "turn") curv += (phase.targetCurv - curv) * 0.5;
+      else curv += (0 - curv) * ease;
+
+      // VETO relief: si la courbure actuelle mène à du franchissable-impossible,
+      // l'inverser brièvement (le relief esquive, il ne lisse pas)
+      const altHere = this.altAt(x, y);
+      const aheadOK = (c: number) => {
+        const px = x + Math.cos(heading + c * 40) * 40;
+        const py = y + Math.sin(heading + c * 40) * 40;
+        const slope = Math.abs(this.altAt(px, py) - altHere) / 40;
+        const wet = this.wetnessAt(px, py);
+        return slope <= this.cfgOf(biome).maxSlope * 1.2 && wet < 0.8;
+      };
+      if (phase.kind === "turn" && !aheadOK(curv)) {
+        curv = -curv * 0.7; // contre-braquage: le relief renvoie la piste
+        phase.targetCurv = curv;
+      }
+
+      heading += curv * step;
 
       x += Math.cos(heading) * step;
       y += Math.sin(heading) * step;
@@ -347,7 +388,7 @@ export class WorldGenerator {
       const prev = this.points[this.points.length - 1];
       const slopePermille = prev ? ((alt - prev.alt) / step) * 1000 : 0;
       this.points.push({
-        x, y, km, alt, slopePermille, curvature,
+        x, y, km, alt, slopePermille, curvature: curv,
         biome, terrain: "piste_moyenne", width: "moyenne",
       });
     }
