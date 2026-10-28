@@ -21,12 +21,19 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist "node_modules" (
+if not exist "node_modules\typescript\bin\tsc" (
   echo [1/3] Installation des composants ^(premiere fois seulement^)...
   call npm install --no-fund --no-audit
   if errorlevel 1 (
     echo.
     echo [ERREUR] L'installation a echoue. Verifiez votre connexion internet.
+    pause
+    exit /b 1
+  )
+  if not exist "node_modules\typescript\bin\tsc" (
+    echo.
+    echo [ERREUR] TypeScript n'a pas ete installe.
+    echo Supprimez le dossier node_modules puis relancez ce fichier.
     pause
     exit /b 1
   )
@@ -39,10 +46,11 @@ if not exist "packages\server\dist\index.js" (
   if errorlevel 1 (
     echo.
     echo [ERREUR] La compilation a echoue.
+    echo Essayez de supprimer le dossier node_modules et relancez.
     pause
     exit /b 1
   )
-  echo.
+  echo .
 )
 
 echo [3/3] Demarrage du serveur de course...

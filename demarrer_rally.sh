@@ -16,7 +16,7 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ ! -d "node_modules" ]; then
+if [ ! -f "node_modules/typescript/bin/tsc" ]; then
   echo "[1/3] Installation des composants (première fois seulement)..."
   npm install --no-fund --no-audit || { echo "[ERREUR] Installation échouée — vérifiez votre connexion internet."; exit 1; }
   echo
