@@ -506,7 +506,10 @@ function openPlanner(): void {
   const content = $("fscontent");
   content.innerHTML = "";
   const wrap = document.createElement("div");
-  wrap.style.cssText = "max-height:100%;overflow-y:auto";
+  wrap.style.cssText = "overflow-y:auto";
+  // hauteur réelle du conteneur: le planificateur scrolle jusqu'en bas
+  const fsBtn = $("btn-close");
+  wrap.style.maxHeight = (fsEl.clientHeight - fsBtn.clientHeight - 40) + "px";
 
   const rules = JSON.parse(JSON.stringify(car.rules));
   let dirty = false;

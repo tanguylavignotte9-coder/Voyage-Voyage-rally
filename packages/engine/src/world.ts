@@ -144,8 +144,12 @@ export class WorldGenerator {
     let first = biomes[0];
     const wSum = biomes.reduce((s, b) => s + weights[b], 0);
     for (const b of biomes) { r -= weights[b] / wSum; if (r <= 0) { first = b; break; } }
-    const order: Biome[] = [];
-    for (let i = 0; i < biomes.length; i++) order.push(biomes[(biomes.indexOf(first) + i) % biomes.length]);
+    // La course DÉMARRE EN STEPPE (première zone = steppe): départ roulant,
+    // la montagne arrive plus tard — la course se corse progressivement.
+    const order: Biome[] = ["steppe"];
+    const suite: Biome[] = biomes.filter((b) => b !== "steppe");
+    const startIdx = suite.indexOf(first) >= 0 ? suite.indexOf(first) : 0;
+    for (let i = 0; i < suite.length; i++) order.push(suite[(startIdx + i) % suite.length]);
     // distance totale à couvrir: proportionnelle aux pondérations
     let acc = 0;
     let cursor = 0;
@@ -167,6 +171,8 @@ export class WorldGenerator {
     const realKm = this.points[this.points.length - 1].km;
     this.totalKm = Math.round(realKm);
     this.biomeZones.forEach((z) => { z.endKm = Math.min(z.endKm, this.totalKm); });
+    // purge des zones vidées par la troncature (bornes inversées)
+    this.biomeZones = this.biomeZones.filter((z) => z.endKm > z.startKm);
     this.assignTerrain();
     this.buildFeatures();
     this.buildSegments();
