@@ -38,6 +38,7 @@ function mkCar(pace: any = "normale"): CarState {
     stopWork: null, overtaking: "prudent", defending: false, offsetSeconds: 0, dailyKm: 0, dayStartTick: 0,
     dailyMaxSpeed: 0, mentalLog: [], towedBy: null, transactions: [],
     stats: { distance: 0, maxSpeed: 0, pannes: 0, depenses: 0, primes: 0, accidents: 0, depassements: 0 },
+    gear: 1, rpm: 900, throttle: 0, brake: 0,
   };
 }
 

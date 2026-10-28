@@ -36,6 +36,10 @@ interface MyCar {
   immobilizedReason: string | null;
   positionKm: number;
   dailyKm: number;
+  gear: number;
+  rpm: number;
+  throttle: number;
+  brake: number;
   settings: { tirePressure: number; groundClearance: number; engineMap: number; startFuel: number };
   stopped: boolean;
 }
@@ -514,111 +518,43 @@ function openPlanner(): void {
   const rules = JSON.parse(JSON.stringify(car.rules));
   let dirty = false;
 
+  // rendu COMPACT: une ligne par règle — N° | on/off | condition→action | durée | éditer | suppr
   const render = () => {
-    wrap.innerHTML = "<h2>Planificateur — 50 canaux, le n° le plus bas gagne</h2>";
+    wrap.innerHTML = "<h2 style='margin:0 0 6px'>Planificateur — 50 canaux <small>(le n° le plus bas gagne)</small></h2>";
+    const table = document.createElement("table");
+    table.style.cssText = "width:100%;border-collapse:collapse;font-size:12px";
+    table.innerHTML = "<tr style='color:#d9a441;text-align:left'><th>N°</th><th>On</th><th>Condition(s)</th><th>Action</th><th style='width:40px'></th></tr>";
     const sorted = [...rules].sort((a: any, b: any) => a.channel - b.channel);
     for (const r of sorted) {
-      const card = document.createElement("div");
-      card.className = "rule";
-      card.style.marginBottom = ".5rem";
-      const head = document.createElement("div");
-      head.className = "head";
-      const title = document.createElement("span");
-      title.innerHTML = `N°${r.channel} <span class="${r.enabled ? "on" : "off"}">${r.enabled ? "ON" : "OFF"}</span> — ${r.mode === "one_shot" ? "one-shot" : "persistante"}`;
-      head.appendChild(title);
-
-      const chanSel = document.createElement("select");
-      for (let ch = 1; ch <= 50; ch++) {
-        const opt = document.createElement("option");
-        opt.value = String(ch);
-        opt.textContent = `N°${ch}`;
-        chanSel.appendChild(opt);
-      }
-      chanSel.value = String(r.channel);
-      chanSel.onchange = () => {
-        const newCh = parseInt(chanSel.value);
-        if (rules.some((x: any) => x.channel === newCh)) return;
-        r.channel = newCh;
-        dirty = true;
-        render();
-      };
+      const tr = document.createElement("tr");
+      tr.style.cssText = "border-top:1px solid #444;height:26px";
+      const cond = r.conditions.length === 0 ? "<i>toujours</i>" : r.conditions.map(condText).join(" ET ");
+      const effTxt = r.effect.kind === "duration" ? ` (${r.effect.hours}h)` : r.effect.kind === "distance" ? ` (${r.effect.km}km)` : "";
+      const modeTxt = r.mode === "one_shot" ? " ⚡" : "";
+      tr.innerHTML = `<td><b>${r.channel}</b></td><td>${r.enabled ? "🟢" : "⚪"}</td><td>${escapeHtml(cond)}</td><td>${escapeHtml(actionText(r.action))}${effTxt}${modeTxt}</td>`;
+      const td = document.createElement("td");
+      td.style.whiteSpace = "nowrap";
       const toggle = document.createElement("button");
-      toggle.textContent = r.enabled ? "⏸ Désactiver" : "▶ Activer";
-      toggle.onclick = () => { r.enabled = !r.enabled; dirty = true; render(); };
+      toggle.className = "small";
+      toggle.textContent = r.enabled ? "⏸" : "▶";
+      toggle.title = r.enabled ? "Désactiver" : "Activer";
+      toggle.onclick = () => { r.enabled = !r.enabled; render(); };
+      const edit = document.createElement("button");
+      edit.className = "small";
+      edit.textContent = "✎";
+      edit.title = "Éditer";
+      edit.onclick = () => openRuleEditor(r);
       const del = document.createElement("button");
+      del.className = "small";
       del.textContent = "🗑";
-      del.onclick = () => { rules.splice(rules.indexOf(r), 1); dirty = true; render(); };
-      const controls = document.createElement("span");
-      controls.append(chanSel, toggle, del);
-      head.appendChild(controls);
-      card.appendChild(head);
-
-      const condHeader = document.createElement("div");
-      condHeader.innerHTML = "<b>Conditions (ET, max 3)</b>";
-      card.appendChild(condHeader);
-      for (const cond of r.conditions) {
-        const row = document.createElement("div");
-        row.style.cssText = "display:flex;align-items:center;gap:.3rem";
-        row.appendChild(renderConditionEditor(cond, () => { dirty = true; renderSummary(); }));
-        const rm = document.createElement("button");
-        rm.textContent = "✕";
-        rm.className = "small";
-        rm.onclick = () => { r.conditions.splice(r.conditions.indexOf(cond), 1); dirty = true; render(); };
-        row.appendChild(rm);
-        card.appendChild(row);
-      }
-      if (r.conditions.length < 3) {
-        const addCond = document.createElement("button");
-        addCond.textContent = "+ condition";
-        addCond.className = "small";
-        addCond.onclick = () => {
-          r.conditions.push({ kind: "bool", variable: "nuit", value: true });
-          dirty = true;
-          render();
-        };
-        card.appendChild(addCond);
-      }
-
-      const actHeader = document.createElement("div");
-      actHeader.innerHTML = "<b>Action</b>";
-      card.append(actHeader);
-      card.appendChild(renderActionEditor(r, () => { dirty = true; render(); }));
-
-      const effHeader = document.createElement("div");
-      effHeader.innerHTML = "<b>Durée d'effet</b>";
-      card.appendChild(effHeader);
-      const effRow = document.createElement("div");
-      effRow.style.cssText = "display:flex;gap:.3rem;align-items:flex-end;flex-wrap:wrap";
-      const effSel = select(
-        [
-          { value: "default", label: "jusqu'à consigne contraire" },
-          { value: "duration", label: "pendant (heures)" },
-          { value: "distance", label: "pendant (km)" },
-        ],
-        r.effect.kind,
-        (v) => {
-          r.effect = v === "default" ? { kind: "default" } : v === "duration" ? { kind: "duration", hours: 2 } : { kind: "distance", km: 200 };
-          dirty = true;
-          render();
-        }
-      );
-      effRow.appendChild(effSel);
-      if (r.effect.kind === "duration") effRow.appendChild(numberInput(r.effect.hours, (v) => { r.effect.hours = v; dirty = true; renderSummary(); }));
-      if (r.effect.kind === "distance") effRow.appendChild(numberInput(r.effect.km, (v) => { r.effect.km = v; dirty = true; renderSummary(); }));
-      card.appendChild(effRow);
-
-      const modeRow = document.createElement("div");
-      modeRow.style.marginTop = ".3rem";
-      modeRow.appendChild(select(
-        [{ value: "persistante", label: "Persistante (gardien)" }, { value: "one_shot", label: "One-shot (à réarmer)" }],
-        r.mode,
-        (v) => { r.mode = v; dirty = true; render(); }
-      ));
-      card.appendChild(modeRow);
-      wrap.appendChild(card);
+      del.onclick = () => { rules.splice(rules.indexOf(r), 1); render(); };
+      td.append(toggle, edit, del);
+      tr.appendChild(td);
+      table.appendChild(tr);
     }
-
+    wrap.appendChild(table);
     const bottom = document.createElement("div");
+    bottom.style.cssText = "margin-top:8px";
     const addBtn = document.createElement("button");
     addBtn.textContent = "+ Nouvelle règle";
     addBtn.onclick = () => {
@@ -626,27 +562,93 @@ function openPlanner(): void {
       const used = new Set(rules.map((r: any) => r.channel));
       let ch = 1;
       while (used.has(ch)) ch++;
-      rules.push({
-        channel: ch, enabled: true, conditions: [],
-        action: { kind: "allure", level: "normale" },
-        effect: { kind: "default" }, mode: "persistante",
-      });
-      dirty = true;
+      const nr = { channel: ch, enabled: true, conditions: [], action: { kind: "allure", level: "normale" }, effect: { kind: "default" }, mode: "persistante" };
+      rules.push(nr);
       render();
+      openRuleEditor(nr);
     };
     const saveBtn = document.createElement("button");
     saveBtn.textContent = "💾 Enregistrer";
     saveBtn.style.background = "#7c7";
-    saveBtn.onclick = () => {
-      send({ type: "rules", rules });
-      closeFullscreen();
-    };
+    saveBtn.onclick = () => { send({ type: "rules", rules }); closeFullscreen(); };
     bottom.append(addBtn, saveBtn);
     wrap.appendChild(bottom);
-    renderSummary();
   };
 
-  const renderSummary = () => {};
+  // éditeur d'une règle: panneau au-dessus de la liste (condition/action/durée)
+  const openRuleEditor = (r: any) => {
+    const panel = document.createElement("div");
+    panel.style.cssText = "border:1px solid #d9a441;border-radius:6px;padding:8px;margin-bottom:8px;background:#2f2a22";
+    const close = () => { panel.remove(); };
+    const rebuild = () => {
+      panel.innerHTML = "";
+      const title = document.createElement("div");
+      title.innerHTML = `<b>Éditer la règle N°${r.channel}</b>`;
+      panel.appendChild(title);
+      const row1 = document.createElement("div");
+      row1.style.cssText = "display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-top:6px";
+      const chanSel = document.createElement("select");
+      for (let ch = 1; ch <= 50; ch++) {
+        const opt = document.createElement("option");
+        opt.value = String(ch); opt.textContent = "N°" + ch;
+        chanSel.appendChild(opt);
+      }
+      chanSel.value = String(r.channel);
+      chanSel.onchange = () => { if (!rules.some((x: any) => x.channel === parseInt(chanSel.value))) { r.channel = parseInt(chanSel.value); render(); } };
+      row1.appendChild(field("Canal", chanSel));
+      // conditions (ET)
+      for (const cond of r.conditions) {
+        const condBox = document.createElement("span");
+        condBox.style.cssText = "display:flex;gap:4px;align-items:flex-end";
+        condBox.appendChild(renderConditionEditor(cond, () => { dirty = true; }));
+        const rm = document.createElement("button");
+        rm.className = "small"; rm.textContent = "✕";
+        rm.onclick = () => { r.conditions.splice(r.conditions.indexOf(cond), 1); rebuild(); };
+        condBox.appendChild(rm);
+        row1.appendChild(condBox);
+      }
+      if (r.conditions.length < 3) {
+        const addC = document.createElement("button");
+        addC.className = "small"; addC.textContent = "+ condition";
+        addC.onclick = () => { r.conditions.push({ kind: "bool", variable: "nuit", value: true }); rebuild(); };
+        row1.appendChild(addC);
+      }
+      panel.appendChild(row1);
+      const row2 = document.createElement("div");
+      row2.style.cssText = "display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-top:6px";
+      row2.appendChild(renderActionEditor(r, () => { dirty = true; }));
+      // durée d'effet
+      const effSel = select(
+        [
+          { value: "default", label: "jusqu'à consigne contraire" },
+          { value: "duration", label: "pendant (h)" },
+          { value: "distance", label: "pendant (km)" },
+        ],
+        r.effect.kind,
+        (v: string) => {
+          r.effect = v === "default" ? { kind: "default" } : v === "duration" ? { kind: "duration", hours: 2 } : { kind: "distance", km: 200 };
+          rebuild();
+        }
+      );
+      row2.appendChild(field("Durée", effSel));
+      if (r.effect.kind === "duration") row2.appendChild(numberInput(r.effect.hours, (v: number) => { r.effect.hours = v; }));
+      if (r.effect.kind === "distance") row2.appendChild(numberInput(r.effect.km, (v: number) => { r.effect.km = v; }));
+      const modeSel = select(
+        [{ value: "persistante", label: "Persistante" }, { value: "one_shot", label: "One-shot" }],
+        r.mode,
+        (v: string) => { r.mode = v; }
+      );
+      row2.appendChild(field("Mode", modeSel));
+      panel.appendChild(row2);
+      const done = document.createElement("button");
+      done.textContent = "✓ Terminé";
+      done.style.marginTop = "6px";
+      done.onclick = () => { close(); render(); };
+      panel.appendChild(done);
+    };
+    rebuild();
+    wrap.insertBefore(panel, wrap.firstChild);
+  };
   render();
   content.appendChild(wrap);
 }
@@ -751,143 +753,170 @@ function openResults(): void {
   content.appendChild(wrap);
 }
 
-// ===== Carte =====
-function openMap(): void {
-  if (!state) return;
-  $("fullscreen").style.display = "block";
-  const content = $("fscontent");
-  content.innerHTML = "";
-  const c = document.createElement("canvas");
-  c.width = content.clientWidth || 900;
-  c.height = (content.clientWidth || 900) * 0.5;
-  content.appendChild(c);
-  drawMap(c.getContext("2d")!, c.width, c.height);
-}
+// ===== CARTE topographique: ZOOM (molette) + PAN (drag) =====
+let mapZoomLevel = 1;
+let mapCenterKm: number | null = null;
+let mapDrag: { x: number; y: number } | null = null;
 
 function drawMap(m: CanvasRenderingContext2D, w: number, h: number): void {
   if (!state) return;
-  const total = state.world.totalKm;
   m.fillStyle = "#3a332a";
   m.fillRect(0, 0, w, h);
-  const profileY = (alt: number) => h * 0.55 - (alt / 4000) * h * 0.45;
-
-  m.strokeStyle = "#5a4f3d";
-  m.lineWidth = 1;
-  state.world.segments.forEach((seg: any) => {
-    m.fillStyle = BIOME_COLORS[seg.biome];
-    m.fillRect((seg.km / total) * w, h - 24, w / state.world.segments.length + 1, 24);
-  });
-
-  // VRAI tracé (vue du dessus) — le tracé 2D réel du monde, échantillonné au km
   const pts = state.pathSummary ?? [];
+  if (pts.length === 0) return;
+
+  const myPos = state.cars.find((c) => c.playerId === myId);
+  if (mapCenterKm === null && myPos) mapCenterKm = myPos.positionKm;
+  const focusKm = mapCenterKm ?? myPos?.positionKm ?? 0;
+  const focusPt = pts.reduce((best: any, p: any) => Math.abs(p.km - focusKm) < Math.abs(best.km - focusKm) ? p : best, pts[0]);
+
   const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const span = Math.max(maxX - minX, maxY - minY) * 1.1;
-  const cx0 = (minX + maxX) / 2, cy0 = (minY + maxY) / 2;
-  const mapX = (x: number) => w / 2 + ((x - cx0) / span) * Math.min(w - 60, h * 1.6);
-  const mapY = (y: number) => h * 0.52 + ((y - cy0) / span) * Math.min(w - 60, h * 1.6);
-  if (pts.length > 1) {
-    m.strokeStyle = "#d9a441";
-    m.lineWidth = 3;
+  const spanAll = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) * 1.08 || 1;
+  const span = spanAll / mapZoomLevel;
+  const cx0 = focusPt.x, cy0 = focusPt.y;
+  const side = Math.min(w - 40, h - 40);
+  const mapX = (x: number) => w / 2 + ((x - cx0) / span) * side;
+  const mapY = (y: number) => h / 2 + ((y - cy0) / span) * side;
+
+  // biomes en bandes sous le tracé
+  for (const z of state.world.biomeZones ?? []) {
+    m.strokeStyle = BIOME_COLORS[z.biome] ?? "#8fae6d";
+    m.globalAlpha = 0.3;
+    m.lineWidth = 9;
     m.beginPath();
-    pts.forEach((p, i) => {
+    let started = false;
+    for (const p of pts) {
+      if (p.km < z.startKm || p.km > z.endKm) continue;
       const x = mapX(p.x), y = mapY(p.y);
-      if (i === 0) m.moveTo(x, y);
-      else m.lineTo(x, y);
-    });
+      if (!started) { m.moveTo(x, y); started = true; } else m.lineTo(x, y);
+    }
     m.stroke();
-    // position des voitures sur le VRAI tracé
-    state.cars.forEach((c) => {
-      const nearest = pts.reduce((best: any, p: any) =>
-        Math.abs(p.km - c.positionKm) < Math.abs(best.km - c.positionKm) ? p : best, pts[0]);
-      const x = mapX(nearest.x), y = mapY(nearest.y);
-      m.fillStyle = c.color;
-      m.beginPath();
-      m.arc(x, y, 6, 0, Math.PI * 2);
-      m.fill();
-      const pp = state!.players.find((pp2) => pp2.id === c.playerId);
-      m.fillStyle = "#fff";
-      m.fillText(pp?.pseudo ?? "", x + 8, y + 3);
-    });
-    // départ / arrivée
-    m.fillStyle = "#fff";
-    m.font = "bold 12px sans-serif";
-    m.fillText("A", mapX(pts[0].x) - 4, mapY(pts[0].y) - 10);
-    m.fillText("B", mapX(pts[pts.length - 1].x) - 4, mapY(pts[pts.length - 1].y) - 10);
+    m.globalAlpha = 1;
   }
-  // profil d'altitude (bande basse)
-  m.strokeStyle = "rgba(217,164,65,0.7)";
-  m.lineWidth = 2;
+
+  m.strokeStyle = "#d9a441";
+  m.lineWidth = Math.max(1.5, 3 / Math.sqrt(mapZoomLevel));
   m.beginPath();
-  state.world.segments.forEach((seg: any, i: number) => {
-    const x = (seg.km / total) * w;
-    const y = h - 26 - (seg.altitude / 4000) * 20;
-    if (i === 0) m.moveTo(x, y);
-    else m.lineTo(x, y);
+  pts.forEach((p, i) => {
+    const x = mapX(p.x), y = mapY(p.y);
+    if (i === 0) m.moveTo(x, y); else m.lineTo(x, y);
   });
   m.stroke();
 
-  // stations, villages, ponts: positionnés sur le VRAI tracé (position 2D la plus proche)
-  m.font = "11px sans-serif";
-  const onPath = (km: number) => {
-    let best = pts[0], bd = Infinity;
-    for (const p of pts) {
-      const d = Math.abs(p.km - km);
-      if (d < bd) { bd = d; best = p; }
-    }
-    return { x: mapX(best.x), y: mapY(best.y) };
-  };
+  const iconSize = Math.min(16, Math.max(10, 14 / Math.sqrt(mapZoomLevel)));
+  m.font = iconSize + "px sans-serif";
   state.world.stations.forEach((s: any) => {
-    const pos = onPath(s.km);
-    m.fillText("⛽", pos.x - 5, pos.y - 10);
-    if (s.hasHotel) m.fillText("🏨", pos.x + 8, pos.y - 10);
-    m.fillStyle = "#fff";
-    m.fillText(s.name, pos.x - 20, pos.y - 22);
-    m.fillStyle = "#000";
+    const pos = pts.reduce((best: any, p: any) => Math.abs(p.km - s.km) < Math.abs(best.km - s.km) ? p : best, pts[0]);
+    const x = mapX(pos.x), y = mapY(pos.y);
+    m.fillText("⛽", x - iconSize / 2, y - 8);
+    if (s.hasHotel) m.fillText("🏨", x + iconSize / 2, y - 8);
+    if (mapZoomLevel > 2) {
+      m.fillStyle = "#fff";
+      m.font = "9px sans-serif";
+      m.fillText(s.name, x - 18, y - 22);
+      m.font = iconSize + "px sans-serif";
+    }
   });
-  state.world.villages.forEach((v: any) => {
-    const pos = onPath(v.km);
-    m.fillStyle = "#ddd";
-    m.fillText("🏠", pos.x - 5, pos.y + 16);
-  });
-  (state.world.bridges ?? []).forEach((b: any) => {
-    const pos = onPath(b.km);
-    m.fillStyle = "#a86";
-    m.fillText("＝", pos.x - 5, pos.y + 6);
-  });
-  // Fronts météo mobiles visibles sur la carte (on voit la tempête arriver)
+  if (mapZoomLevel > 1.5) {
+    (state.world.villages ?? []).forEach((v: any) => {
+      const pos = pts.reduce((best: any, p: any) => Math.abs(p.km - v.km) < Math.abs(best.km - v.km) ? p : best, pts[0]);
+      m.fillText("🏠", mapX(pos.x) - 5, mapY(pos.y) + 14);
+    });
+    (state.world.bridges ?? []).forEach((b: any) => {
+      const pos = pts.reduce((best: any, p: any) => Math.abs(p.km - b.km) < Math.abs(best.km - b.km) ? p : best, pts[0]);
+      m.fillText("＝", mapX(pos.x) - 5, mapY(pos.y) + 6);
+    });
+  }
   const FRONT_COLORS: Record<string, string> = {
     pluie_diluvienne: "rgba(80,120,220,0.35)", tempete_sable: "rgba(210,160,80,0.4)",
     canicule: "rgba(230,120,40,0.25)", froid_intense: "rgba(160,200,255,0.3)",
     brouillard: "rgba(200,200,200,0.3)", vent_fort: "rgba(150,180,160,0.25)",
     grele: "rgba(190,210,255,0.4)", piste_endommagee: "rgba(120,60,40,0.5)",
   };
+  m.font = "10px sans-serif";
   for (const f of state.fronts ?? []) {
     if (state.tick < f.startTick || state.tick > f.endTick) continue;
-    const color = FRONT_COLORS[f.kind] ?? "rgba(150,150,150,0.3)";
-    m.fillStyle = color;
-    const fx = (f.km / total) * w;
-    const fr = Math.max(4, (f.radiusKm / total) * w);
+    const pos = pts.reduce((best: any, p: any) => Math.abs(p.km - f.km) < Math.abs(best.km - f.km) ? p : best, pts[0]);
+    const fx = mapX(pos.x), fy = mapY(pos.y);
+    m.fillStyle = FRONT_COLORS[f.kind] ?? "rgba(150,150,150,0.3)";
+    const fr = Math.max(3, (f.radiusKm / (state.world.totalKm / mapZoomLevel)) * side * 0.5);
     m.beginPath();
-    m.arc(fx, h / 2, fr, 0, Math.PI * 2);
+    m.arc(fx, fy, fr, 0, Math.PI * 2);
     m.fill();
     m.fillStyle = "#fff";
-    m.font = "10px sans-serif";
-    m.fillText(WEATHER_ICON[f.kind] ?? "?", fx - 6, h / 2 - 6);
+    m.fillText(WEATHER_ICON[f.kind] ?? "?", fx - 6, fy - fr - 4);
   }
-
   state.cars.forEach((c) => {
-    const x = (c.positionKm / total) * w;
-    const y = profileY(altAt(c.positionKm)) - 8;
+    const pos = pts.reduce((best: any, p: any) => Math.abs(p.km - c.positionKm) < Math.abs(best.km - c.positionKm) ? p : best, pts[0]);
+    const x = mapX(pos.x), y = mapY(pos.y);
     m.fillStyle = c.color;
     m.beginPath();
     m.arc(x, y, 6, 0, Math.PI * 2);
     m.fill();
-    const p = state!.players.find((pp) => pp.id === c.playerId);
+    m.strokeStyle = "#fff";
+    m.lineWidth = 1.5;
+    m.stroke();
+    const pp = state!.players.find((q) => q.id === c.playerId);
     m.fillStyle = "#fff";
-    m.fillText(p?.pseudo ?? "", x + 8, y + 3);
+    m.font = "11px sans-serif";
+    m.fillText(pp?.pseudo ?? "", x + 9, y + 4);
   });
+  m.fillStyle = "#fff";
+  m.font = "bold 13px sans-serif";
+  m.fillText("A", mapX(pts[0].x) - 4, mapY(pts[0].y) - 10);
+  m.fillText("B", mapX(pts[pts.length - 1].x) - 4, mapY(pts[pts.length - 1].y) - 10);
+  m.fillStyle = "#888";
+  m.font = "10px sans-serif";
+  m.fillText("Zoom ×" + mapZoomLevel.toFixed(1) + " — molette: zoom, glisser: déplacer, double-clic: suivre", 10, h - 10);
+}
+
+// ===== Carte =====
+function openMap(): void {
+  if (!state) return;
+  mapCenterKm = null;
+  $("fullscreen").style.display = "block";
+  const content = $("fscontent");
+  content.innerHTML = "";
+  const c = document.createElement("canvas");
+  c.width = content.clientWidth - 20 || 900;
+  c.height = (content.clientWidth - 20 || 900) * 0.55;
+  c.style.cssText = "cursor:grab";
+  content.appendChild(c);
+  const ctxM = c.getContext("2d")!;
+  const redraw = () => drawMap(ctxM, c.width, c.height);
+  redraw();
+
+  // molette = zoom autour du point souris
+  c.addEventListener("wheel", (e: WheelEvent) => {
+    e.preventDefault();
+    const old = mapZoomLevel;
+    mapZoomLevel = Math.max(1, Math.min(40, mapZoomLevel * (e.deltaY > 0 ? 0.8 : 1.25)));
+    if (mapZoomLevel === old) return;
+    redraw();
+  }, { passive: false });
+  // drag = pan (déplace le focus en km le long du tracé)
+  c.addEventListener("mousedown", (e: MouseEvent) => {
+    mapDrag = { x: e.offsetX, y: e.offsetY };
+    c.style.cursor = "grabbing";
+  });
+  window.addEventListener("mouseup", () => {
+    if (mapDrag) { mapDrag = null; c.style.cursor = "grab"; }
+  });
+  c.addEventListener("mousemove", (e: MouseEvent) => {
+    if (!mapDrag) return;
+    // pan en km: approx via la largeur visible = totalKm/zoom
+    const dpx = e.offsetX - mapDrag.x;
+    const dkm = -(dpx / c.width) * (state!.world.totalKm / mapZoomLevel);
+    const cur = mapCenterKm ?? state!.cars.find((x) => x.playerId === myId)?.positionKm ?? 0;
+    mapCenterKm = Math.max(0, Math.min(state!.world.totalKm, cur + dkm));
+    mapDrag = { x: e.offsetX, y: e.offsetY };
+    redraw();
+  });
+  c.addEventListener("dblclick", () => { mapCenterKm = null; redraw(); });
+  // refresh périodique (voitures avancent)
+  setInterval(() => {
+    if ($("fullscreen").style.display === "block" && !mapDrag) redraw();
+  }, 2000);
 }
 
 function altAt(km: number): number {
@@ -987,38 +1016,40 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     ctx.fillText("Chargement du tracé…", w / 2 - 70, h / 2);
     return;
   }
-  // RACING LINE CONTINUE: la voiture trace sa trajectoire en lisant la route
-  // sur une fenêtre anticipative (de -100 m derrière à +150 m devant) et en
-  // moyennant la courbure vue. Résultat: elle commence à se placer AVANT le
-  // virage, tient l'apex, s'ouvre en sortie — en MOUVEMENT CONTINU, jamais
-  // en saut binaire.
+  // RACING LINE CONTINUE — apex au MILIEU du virage: on lit la courbure sur une
+  // fenêtre SYMÉTRIQUE (-150/+150 m) et le décalage suit la courbure LOCALE
+  // (forte ici = à l'apex on est à l'intérieur; en approche/sortie on s'ouvre).
   const roadWm0 = seg?.width === "etroite" ? 3.5 : seg?.width === "moyenne" ? 5 : 6.5;
-  // courbure signée lissée sur la fenêtre anticipative
-  let curvWeighted = 0, wSum = 0;
-  for (let dKm = -0.1; dKm <= 0.15; dKm += 0.02) {
-    const pA = pathPoint(km + dKm - 0.004);
-    const pB = pathPoint(km + dKm + 0.004);
-    if (!pA || !pB) continue;
-    // courbure signée locale (produit vectoriel normalisé)
-    const ax = pB.x - pA.x, ay = pB.y - pA.y;
-    const aLen = Math.hypot(ax, ay) || 1;
-    const ahead = dKm > 0;
-    const weight = ahead ? (1 - dKm / 0.15) * 1.4 : 0.6; // on anticipe plus qu'on regarde derrière
-    // direction générale du virage sur cette portion (croix avec la direction globale)
-    const gx = meAhead.x - meRoad.x, gy = meAhead.y - meRoad.y;
-    const cross = (gx * ay - gy * ax) / (aLen * (Math.hypot(gx, gy) || 1));
-    curvWeighted += cross * weight;
-    wSum += weight;
+  const HALFR = 0.15;
+  let curvHere = 0;
+  {
+    const pA = pathPoint(km - 0.006), pB = pathPoint(km + 0.006);
+    if (pA && pB) {
+      const ax = pB.x - pA.x, ay = pB.y - pA.y;
+      const aLen = Math.hypot(ax, ay) || 1;
+      const gx2 = meAhead.x - meRoad.x, gy2 = meAhead.y - meRoad.y;
+      curvHere = (gx2 * ay - gy2 * ax) / (aLen * (Math.hypot(gx2, gy2) || 1));
+    }
   }
-  const curvSmooth = wSum > 0 ? curvWeighted / wSum : 0;
-  // cible latérale: extérieur en approche (signe opposé au virage), intérieur
-  // à l'apex (le poids anticipatif domine quand le virage est DEVANT),
-  // extérieur en sortie (le poids rétrospectif tire dans l'autre sens).
-  // + dérive lente naturelle (la voiture ne tient jamais parfaitemen l'axe)
-  const breathe = Math.sin(km * 137.3) * roadWm0 * 0.1;
-  const targetOffset = Math.max(-1, Math.min(1, -curvSmooth * 18)) * roadWm0 * 0.52 + breathe;
-  // lissage temporel doux (2.5%/frame): le déplacement latéral est fluide
-  racingOffset += (targetOffset - racingOffset) * 0.025;
+  // anticipation: la courbure qui VIENT (devant) déclenche la prise d'extérieur
+  let curvAhead = 0;
+  {
+    const pA = pathPoint(km + 0.02), pB = pathPoint(km + 0.08);
+    if (pA && pB) {
+      const ax = pB.x - pA.x, ay = pB.y - pA.y;
+      const aLen = Math.hypot(ax, ay) || 1;
+      const gx2 = meAhead.x - meRoad.x, gy2 = meAhead.y - meRoad.y;
+      curvAhead = (gx2 * ay - gy2 * ax) / (aLen * (Math.hypot(gx2, gy2) || 1));
+    }
+  }
+  // décalage cible: À L'APEX (courbure locale forte) -> intérieur;
+  // en approche (courbure devant, locale faible) -> extérieur; sortie -> neutre.
+  const breathe = Math.sin(km * 137.3) * roadWm0 * 0.08;
+  const insideNow = Math.max(-1, Math.min(1, -curvHere * 16)) * roadWm0 * 0.5;   // apex: intérieur
+  const outsidePrep = Math.max(-1, Math.min(1, -curvAhead * 16)) * -roadWm0 * 0.4; // approche: extérieur
+  const targetOffset = (Math.abs(curvHere) > 0.06 ? insideNow : outsidePrep) + breathe;
+  // lissage temporel doux: mouvement latéral fluide
+  racingOffset += (targetOffset - racingOffset) * 0.03;
   // position effective de la voiture: axe du tracé + décalage latéral (normale locale)
   const angRoad = Math.atan2(meAhead.y - meRoad.y, meAhead.x - meRoad.x);
   const me = {
@@ -1037,10 +1068,17 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
   const follow = 0.10;
   camX += (targetX - camX) * follow;
   camY += (targetY - camY) * follow;
+  // HYSTÉRÉSIS: 20° de liberté — la caméra ne pivote pas pour des micro-écarts;
+  // au-delà de la zone morte, elle suit franchement (effet de "prise en main").
+  const CAM_DEADZONE = (20 * Math.PI) / 180;
   let dAng = carAngle - camAngle;
   while (dAng > Math.PI) dAng -= 2 * Math.PI;
   while (dAng < -Math.PI) dAng += 2 * Math.PI;
-  camAngle += dAng * 0.25;
+  if (Math.abs(dAng) > CAM_DEADZONE) {
+    // ramener l'écart au bord de la zone morte (la voiture garde sa liberté)
+    const excess = dAng - Math.sign(dAng) * CAM_DEADZONE;
+    camAngle += excess * 0.3;
+  }
 
   // transformation monde -> écran: le CAP de la voiture pointe vers le HAUT.
   // On applique la rotation inverse du cap PUIS un quart de tour (-90°):
@@ -1335,7 +1373,7 @@ function drawCar2D(
 ): void {
   const [sx, sy] = W2S(wx, wy);
   const L = 2.3, W = 1.05;
-  const bounce = moving ? Math.sin(now / 85 + wx * 0.1) * 0.05 : 0;
+  const bounce = 0; // carrosserie stable: plus de va-et-vient
   // cap de la voiture = tangente du tracé à son km
   const pA = pathPoint(kmOfCar - 0.003);
   const pB = pathPoint(kmOfCar + 0.003);
@@ -1418,6 +1456,65 @@ function render(): void {
     );
     if (in12h.length > 0) {
       ctx.fillText(`Prévision 12 h : ${in12h.slice(0, 2).map((f) => WEATHER_FR[f.kind] ?? f.kind).join(", ")}`, 260, h - 11);
+    }
+  }
+  // ===== HUD CONDUITE: rapport + compte-tours + pédales =====
+  {
+    const car = myCar();
+    if (car) {
+      const bw = 220, bh = 86, bx = w - bw - 12, by = h - 30 - bh - 8;
+      ctx.fillStyle = "rgba(30,26,20,0.8)";
+      ctx.fillRect(bx, by, bw, bh);
+      ctx.strokeStyle = "#555";
+      ctx.strokeRect(bx, by, bw, bh);
+      // rapport + régime
+      ctx.fillStyle = "#efe8dc";
+      ctx.font = "bold 20px sans-serif";
+      ctx.fillText(String(car.gear), bx + 10, by + 26);
+      ctx.font = "11px sans-serif";
+      ctx.fillText("e", bx + 26, by + 26);
+      ctx.fillStyle = car.rpm > 4800 ? "#e55" : car.rpm > 3800 ? "#cc7" : "#7c7";
+      ctx.font = "bold 14px sans-serif";
+      ctx.fillText(car.rpm.toFixed(0) + " tr/min", bx + 48, by + 24);
+      // barre régime
+      ctx.fillStyle = "#241f19";
+      ctx.fillRect(bx + 10, by + 32, bw - 20, 8);
+      const rpmShare = Math.min(1, (car.rpm - 900) / (5200 - 900));
+      ctx.fillStyle = rpmShare > 0.85 ? "#e55" : "#d9a441";
+      ctx.fillRect(bx + 10, by + 32, (bw - 20) * rpmShare, 8);
+      // pédales: accélérateur (vert) / frein (rouge)
+      ctx.fillStyle = "#241f19";
+      ctx.fillRect(bx + 10, by + 48, (bw - 30) / 2, 12);
+      ctx.fillRect(bx + bw / 2 + 5, by + 48, (bw - 30) / 2, 12);
+      ctx.fillStyle = "#7c7";
+      ctx.fillRect(bx + 10, by + 48, ((bw - 30) / 2) * Math.min(1, car.throttle), 12);
+      ctx.fillStyle = "#c55";
+      ctx.fillRect(bx + bw / 2 + 5, by + 48, ((bw - 30) / 2) * Math.min(1, car.brake), 12);
+      ctx.fillStyle = "#aaa";
+      ctx.font = "9px sans-serif";
+      ctx.fillText("ACCÉL", bx + 10, by + 44);
+      ctx.fillText("FREIN", bx + bw / 2 + 5, by + 44);
+      // direction: braquage = tangente(+12m) - tangente(-12m) le long du tracé
+      const pA2 = pathPoint(km - 0.012), pB2 = pathPoint(km + 0.012);
+      if (pA2 && pB2) {
+        const tHere = Math.atan2(pB2.y - pA2.y, pB2.x - pA2.x);
+        const pA3 = pathPoint(km - 0.024), pB3 = pathPoint(km);
+        const tBefore = pA3 && pB3 ? Math.atan2(pB3.y - pA3.y, pB3.x - pA3.x) : tHere;
+        let dAng = tHere - tBefore;
+        while (dAng > Math.PI) dAng -= 2 * Math.PI;
+        while (dAng < -Math.PI) dAng += 2 * Math.PI;
+        const steer = Math.max(-1, Math.min(1, -dAng * 12));
+        ctx.strokeStyle = "#efe8dc";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(bx + bw / 2, by + bh - 12);
+        ctx.lineTo(bx + bw / 2 + steer * 60, by + bh - 12);
+        ctx.stroke();
+        ctx.fillStyle = "#aaa";
+        ctx.font = "9px sans-serif";
+        ctx.fillText("◀", bx + bw / 2 - 75, by + bh - 9);
+        ctx.fillText("▶", bx + bw / 2 + 68, by + bh - 9);
+      }
     }
   }
   // météo aussi dans le bandeau haut

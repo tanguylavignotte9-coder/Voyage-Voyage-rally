@@ -363,3 +363,25 @@ export const GEN_COUNTER_STEER = 0.7;          // contre-braquage du relief (vet
 export const GEN_CONTINENTAL_MIN = 0.4, GEN_CONTINENTAL_GAIN = 0.6, GEN_ALT_BASE_SHARE = 0.5;
 export const CONVERGENCE_EFF = 0.98;   // rendement d'équilibre énergie (stabilité numérique)
 export const CONVERGENCE_V_MIN = 0.5;  // plancher de vitesse de l'itération (m/s)
+
+// ========== BOÎTE DE VITESSES (6 rapports) ==========
+// Chaque rapport a ses ratios; le couple roue = couple_moteur(ω) × ratio × rendement.
+// Courbe de couple: monte vers un régime optimal (~3200 tr/min), s'effondre après
+// la zone rouge. Le passage de rapport choisit le meilleur couple disponible.
+export const ENGINE_IDLE_RPM = 900;
+export const ENGINE_OPTIMAL_RPM = 3200;    // pic de couple
+export const ENGINE_REDLINE_RPM = 5200;
+export const ENGINE_MAX_TORQUE_NM = 520;   // couple moteur au pic (N·m)
+export const GEAR_RATIOS = [4.2, 2.6, 1.8, 1.35, 1.05, 0.85]; // 1re..6e (boîte+pont)
+export const GEAR_FINAL_DRIVE = 3.9;       // renvoi différentiel
+export const WHEEL_RADIUS_M = 0.42;        // roue de raid 35"
+export const ENGINE_INERTIA_FACTOR = 0.04; // inertie de rotation (masse équivalente)
+
+// courbe de couple normalisée (0..1 du couple max) selon le régime
+export function torqueCurve(rpm: number): number {
+  if (rpm < ENGINE_IDLE_RPM) return 0.3; // embrayage glisse
+  if (rpm >= ENGINE_REDLINE_RPM) return 0.15; // zone rouge bridée
+  const rise = Math.min(1, (rpm - ENGINE_IDLE_RPM) / (ENGINE_OPTIMAL_RPM - ENGINE_IDLE_RPM));
+  const past = Math.max(0, (rpm - ENGINE_OPTIMAL_RPM) / (ENGINE_REDLINE_RPM - ENGINE_OPTIMAL_RPM));
+  return Math.min(1, 0.55 + 0.45 * rise - 0.55 * past * past);
+}

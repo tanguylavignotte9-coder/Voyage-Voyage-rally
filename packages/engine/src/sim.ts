@@ -8,6 +8,8 @@ import {
   FATIGUE_RECOVERY_BIVOUC_PER_HOUR, FATIGUE_RECOVERY_HOTEL_PER_HOUR,
   ORGAN_MODELS, STRENGTH_SCATTER, WEATHER_STRESS, RISK_ACCIDENT_FACTOR,
   AERO_HALF, CONVERGENCE_DAMPING, CONVERGENCE_EPS, CONVERGENCE_EFF, CONVERGENCE_V_MIN, FUEL_TIME_H_PER_L,
+  ENGINE_IDLE_RPM, ENGINE_REDLINE_RPM, ENGINE_MAX_TORQUE_NM, GEAR_RATIOS, GEAR_FINAL_DRIVE,
+  WHEEL_RADIUS_M, torqueCurve,
   LOAD_SHOCK_GAIN, LOAD_BUMP_CR_GAIN, LOAD_BUMP_V_REF, LOAD_SUSP_OVER_STATIC,
   LOAD_TIRE_SHOCK_AV, LOAD_TIRE_SHOCK_AR, LOAD_TIRE_TRACTION_SHARE,
   LOAD_CHASSIS_STATIC_SHARE, LOAD_CHASSIS_SHOCK_SHARE, LOAD_ENGINE_NIGHT_EXTRA,
@@ -93,14 +95,49 @@ export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string
   // l'adhérence (4 roues motrices: ~0.9 × mu × m × g). Sur piste meuble,
   // la voiture ne peut pas pousser plus fort que le sol ne le permet.
   const maxTractionF = WHEEL_DRIVE_EFF * muEff * mass * g;
-  // itération de résolution: v = min(P/v, F_max) / (F_roll + F_slope + k·v²)
+  // BOÎTE 6 RAPPORTS: rapport optimal pour v (le plus haut sans sur-régimer,
+  // rétrograde sous le ralenti), couple roue = couple_moteur(rpm) × ratio × pont.
+  const gearFor = (vMs: number): number => {
+    let best = 0;
+    for (let gi = 0; gi < GEAR_RATIOS.length; gi++) {
+      const rpm = vMs / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI);
+      if (rpm <= ENGINE_REDLINE_RPM * 0.98) best = gi;
+    }
+    while (best > 0) {
+      const rpm = vMs / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[best] * GEAR_FINAL_DRIVE / (2 * Math.PI);
+      if (rpm >= ENGINE_IDLE_RPM) break;
+      best--;
+    }
+    return best;
+  };
+  const altLoss2 = 1 - ALTITUDE_POWER_LOSS * Math.min(1, Math.max(0, (seg.altitude - 200) / 3000));
+  // l'accélérateur réel: allure × risque × carto × altitude × NUIT × FATIGUE
+  // (la nuit et la fatigue font lever le pied — effet moteur, pas hardcap)
+  const nightThrottle = 1 - darkness * NIGHT_POWER_LOSS;
+  const fatigueThrottle = car.fatigue > FATIGUE_POWER_START
+    ? 1 - ((car.fatigue - FATIGUE_POWER_START) / 100) * FATIGUE_POWER_RATE : 1;
+  const throttleShare = (PACE_SPEED_FACTOR[car.pace] ?? 0.7) * (RISK_SPEED_BONUS[car.risk] ?? 1.0)
+    * eff.power * altLoss2 * nightThrottle * fatigueThrottle;
+  // itération de résolution: le couple de boîte alimente l'équilibre des forces
   let v = 20;
   for (let i = 0; i < 14; i++) {
     const fTotal = Math.max(50, rollingF + slopeF + kAero * v * v);
-    const fTraction = Math.min(powerEff / v, maxTractionF); // force réelle au sol
+    const gi = gearFor(v);
+    const rpm = v / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI);
+    const fGear = torqueCurve(rpm) * ENGINE_MAX_TORQUE_NM * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE
+      * TRANSMISSION_EFF / WHEEL_RADIUS_M * throttleShare;
+    const fTraction = Math.min(fGear, maxTractionF);
     const vNext = (fTraction * v) / fTotal * CONVERGENCE_EFF + CONVERGENCE_V_MIN;
     v = v + (vNext - v) * CONVERGENCE_DAMPING;
     if (Math.abs(vNext - v) < CONVERGENCE_EPS) break;
+  }
+  // état moteur exposé (HUD pédales/régime/rapport)
+  {
+    const gi = gearFor(v);
+    car.gear = gi + 1;
+    car.rpm = Math.max(ENGINE_IDLE_RPM, v / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI));
+    car.throttle = Math.min(1, throttleShare);
+    car.brake = slopeFrac < -0.015 ? Math.min(1, -slopeFrac * 8) : 0;
   }
   // le virage borne par la physique (pas un cap arbitraire: c'est l'adhérence)
   if (vTurnEff < v) v = vTurnEff;
@@ -539,6 +576,7 @@ const SYMPTOMS: Record<OrganId, { vague: string; grave: string }> = {
 // La PANNE est un ÉCHEC DE CHARGE: contrainte > résistance résiduelle
 // (usure + dispersion matérielle) — un organe neuf encaisse, un usé cède.
 function computeOrganLoads(car: CarState, seg: TerrainSegment, weather: string, darkness: number, v: number): Record<string, number> {
+  const gearIdx = Math.max(0, Math.min(GEAR_RATIOS.length - 1, (car.gear || 1) - 1));
   const mass = CAR_MASS_KG + car.fuel * FUEL_DENSITY_KG_PER_L;
   const g = GRAVITY;
   const cr = ROLLING_RES[seg.terrain] ?? 0.04;
@@ -546,9 +584,14 @@ function computeOrganLoads(car: CarState, seg: TerrainSegment, weather: string, 
   const weatherStress = WEATHER_STRESS[weather] ?? 1.0;
   const vMs = v / 3.6;
   const mu = LATERAL_GRIP[seg.terrain] ?? 0.5;
+  // traction réelle: couple de boîte au régime courant × accélérateur (borné
+  // par l'adhérence). P/v explosait à basse vitesse — la boîte donne le vrai couple.
+  const rpmNow = Math.max(ENGINE_IDLE_RPM, vMs / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[gearIdx] * GEAR_FINAL_DRIVE / (2 * Math.PI));
+  const throttleNow = (PACE_SPEED_FACTOR[car.pace] ?? 0.7);
   const fTraction = Math.min(
-    CAR_POWER_W * TRANSMISSION_EFF * (PACE_SPEED_FACTOR[car.pace] ?? 0.7) / Math.max(5, vMs),
-    0.9 * mu * mass * g
+    torqueCurve(rpmNow) * ENGINE_MAX_TORQUE_NM * GEAR_RATIOS[gearIdx] * GEAR_FINAL_DRIVE
+      * TRANSMISSION_EFF / WHEEL_RADIUS_M * throttleNow,
+    WHEEL_DRIVE_EFF * mu * mass * g
   );
   // charges calibrées pour un SUV de raid: la charge nominale représente
   // ~80% du pire cas réaliste — en usage normal on vit à 0.4-0.8×nominale,
@@ -560,7 +603,7 @@ function computeOrganLoads(car: CarState, seg: TerrainSegment, weather: string, 
   const bumpFactor = 1 + Math.min(1.6, cr * LOAD_BUMP_CR_GAIN) * Math.min(1, vMs / LOAD_BUMP_V_REF);
   const shock = mass * (vMs * vMs) * cr * LOAD_SHOCK_GAIN;
   return {
-    moteur: fTraction * weatherStress * (1 + darkness * LOAD_ENGINE_NIGHT_EXTRA),
+    moteur: (fTraction / (GEAR_RATIOS[gearIdx] * GEAR_FINAL_DRIVE)) * WHEEL_RADIUS_M * weatherStress * (1 + darkness * LOAD_ENGINE_NIGHT_EXTRA),
     transmission: fTraction * LOAD_TRANSMISSION_OVER * weatherStress,
     pneus_av: (statWheel * bumpFactor + shock * LOAD_TIRE_SHOCK_AV) * weatherStress,
     pneus_ar: (statWheel * bumpFactor + shock * LOAD_TIRE_SHOCK_AR + fTraction * LOAD_TIRE_TRACTION_SHARE) * weatherStress,

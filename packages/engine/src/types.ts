@@ -210,6 +210,10 @@ export interface CarState {
   overtaking: "agressif" | "prudent" | "interdit";
   defending: boolean;
   offsetSeconds: number;
+  gear: number;   // rapport engagé (1..6)
+  rpm: number;    // régime moteur (tr/min)
+  throttle: number; // 0..1 accélérateur
+  brake: number;    // 0..1 frein
   dailyKm: number;
   dayStartTick: number;
   dailyMaxSpeed: number;

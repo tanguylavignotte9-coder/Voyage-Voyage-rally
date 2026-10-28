@@ -159,6 +159,10 @@ function stateMsg(forPlayerId: string | null): any {
           immobilizedReason: mine.immobilizedReason,
           positionKm: mine.positionKm,
           dailyKm: mine.dailyKm,
+          gear: mine.gear,
+          rpm: mine.rpm,
+          throttle: mine.throttle,
+          brake: mine.brake,
         }
       : null,
   };
