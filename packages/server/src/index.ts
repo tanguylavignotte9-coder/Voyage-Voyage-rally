@@ -47,9 +47,9 @@ let host = RaceHost.restore(SNAP_DIR) || new RaceHost(config!, SNAP_DIR);
 if (host.race.started && !host.race.paused && host.wallClockSnapshot) {
   const missedMs = Date.now() - host.wallClockSnapshot;
   if (missedMs > 60_000) {
-    const steps = Math.min(3600 * 24 * 2, Math.floor(missedMs / 1000));
-    console.log(`Rattrapage accéléré : ${steps} ticks (${(steps / 3600).toFixed(1)} h)…`);
-    host.race.log(`Redémarrage serveur — rattrapage accéléré de ${(steps / 3600).toFixed(1)} h`);
+    const steps = Math.min(3600 * 24 * 2 * 30, Math.floor((missedMs / 1000) * 30));
+    console.log(`Rattrapage accéléré : ${steps} ticks (${(steps / (3600 * 30)).toFixed(1)} h)…`);
+    host.race.log(`Redémarrage serveur — rattrapage accéléré de ${(steps / (3600 * 30)).toFixed(1)} h`);
     for (let i = 0; i < steps; i++) host.race.step();
     console.log("Rattrapage terminé.");
   }
@@ -269,7 +269,7 @@ wss.on("connection", (ws) => {
       }
       case "admin_advance": {
         if (!client.isAdmin) return;
-        const steps = Math.min(3600 * 24, msg.steps | 0);
+        const steps = Math.min(3600 * 24 * 30, (msg.steps | 0));
         for (let i = 0; i < steps; i++) race.step();
         broadcastState();
         break;
@@ -302,8 +302,14 @@ wss.on("connection", (ws) => {
   ws.send(JSON.stringify(stateMsg(null)));
 });
 
+let lastBroadcast = 0;
 setInterval(() => {
-  if (host.race.step()) broadcastState();
+  host.race.step();
+  const now = Date.now();
+  if (now - lastBroadcast >= 500) {
+    lastBroadcast = now;
+    broadcastState();
+  }
 }, TICK_MS);
 
 setInterval(() => {

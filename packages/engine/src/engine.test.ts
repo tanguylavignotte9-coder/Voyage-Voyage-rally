@@ -95,7 +95,7 @@ test("course: voiture sans règle avance en allure prudente", () => {
   const race = new Race({ seedText: "y", targetHours: 3, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
   race.addPlayer("a", "Alice", "#111");
   race.start();
-  for (let i = 0; i < 3600; i++) race.step();
+  for (let i = 0; i < 3600 * 30; i++) race.step();
   const car = race.cars[0];
   assert.ok(car.positionKm > 10, `position=${car.positionKm}`);
   assert.equal(car.pace, "prudente");
@@ -112,7 +112,7 @@ test("immobilisation: camion appelable, 6h puis remorquage", () => {
   const kmAtStop = car.positionKm;
   race.callTruck("a");
   assert.notEqual(car.truckCalledTick, null);
-  for (let i = 0; i < 3600 * 6; i++) race.step();
+  for (let i = 0; i < 3600 * 6 * 30; i++) race.step();
   assert.ok(!car.immobilized, "doit être remorqué après 6h");
   assert.ok(car.positionKm > kmAtStop, "doit avoir été remorqué vers l'avant");
 });

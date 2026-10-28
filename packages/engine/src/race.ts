@@ -58,7 +58,7 @@ export class Race {
 
   hourOfDay(tick: number): number {
     const startHour = 8;
-    return (startHour + (tick - this.raceStartTick) / 3600) % 24;
+    return (startHour + (tick - this.raceStartTick) / TICKS_PER_HOUR) % 24;
   }
 
   addPlayer(id: string, pseudo: string, color: string, isAdmin = false): void {
@@ -158,7 +158,7 @@ export class Race {
   }
 
   private tickDaily(): void {
-    const day = Math.floor((this.tick - this.raceStartTick) / (24 * 3600)) + 1;
+    const day = Math.floor((this.tick - this.raceStartTick) / (24 * TICKS_PER_HOUR)) + 1;
     const hour = this.hourOfDay(this.tick);
     if (day > this.lastPrimeDay && hour >= PRIME_HOUR % 24) {
       this.lastPrimeDay = day;
@@ -223,7 +223,7 @@ export class Race {
         }
         const station = this.world.stations.find((s) => s.km > car.positionKm);
         if (station) {
-          const speed = Math.min(tower.speedKmh, 25) / 3600;
+          const speed = (Math.min(tower.speedKmh, 25) * (1 / 30)) / 3600;
           car.positionKm = Math.min(station.km, car.positionKm + speed);
           tower.positionKm = Math.min(station.km, tower.positionKm + speed);
           if (car.positionKm >= station.km) {
@@ -310,7 +310,7 @@ export class Race {
     }
     const allDone = this.cars.every((c) => c.arrived || c.forfait);
     if (allDone && this.cars.length > 0 && this.closureAtTick === null) {
-      this.closureAtTick = this.tick + this.params.closureDelayHours * 3600;
+      this.closureAtTick = this.tick + this.params.closureDelayHours * TICKS_PER_HOUR;
       this.log(`Tous les participants sont arrivés ou forfait. Clôture dans ${this.params.closureDelayHours} h.`);
     }
     if (this.closureAtTick !== null && this.tick >= this.closureAtTick) {

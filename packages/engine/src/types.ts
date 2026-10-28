@@ -151,7 +151,8 @@ export interface StationWork {
   hotel: boolean;
 }
 
-export const TICKS_PER_HOUR = 3600;
+export const TICKS_PER_HOUR = 108000; // 30 ticks/s × 3600
+export const TICKS_PER_SECOND = 30;
 export const TRUCK_FIXED_HOURS = 6;
 export { FUEL_CAPACITY_L, BUDGET_START } from "./calibration";
 export interface CarStats {

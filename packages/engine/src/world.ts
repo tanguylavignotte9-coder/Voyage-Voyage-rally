@@ -171,7 +171,7 @@ export function generateWeatherFronts(world: World, rng: Rng, ticksPerHour: numb
   const fronts: WeatherFront[] = [];
   let id = 1;
   const totalTicks = (world.totalKm / AVG_SPEED_KMH) * ticksPerHour;
-  for (let t = 0; t < totalTicks; t += rng.int(3600, 14400)) {
+  for (let t = 0; t < totalTicks; t += rng.int(ticksPerHour, ticksPerHour * 4)) {
     const km = rng.range(0, world.totalKm);
     const biome = segmentAt(world.segments, km).biome;
     const kinds = FRONT_KINDS_BY_BIOME[biome] ?? ["pluie_diluvienne", "vent_fort"];
@@ -179,10 +179,10 @@ export function generateWeatherFronts(world: World, rng: Rng, ticksPerHour: numb
       id: id++,
       kind: rng.pick(kinds),
       km,
-      speedKmPerTick: rng.range(-0.02, 0.02),
+      speedKmPerTick: rng.range(-0.02, 0.02) / 30,
       radiusKm: rng.range(30, 100),
       startTick: t,
-      endTick: t + rng.int(3600, 14400),
+      endTick: t + rng.int(ticksPerHour, ticksPerHour * 4),
     });
   }
   // Sections de piste endommagée (événements-monde : frappent quiconque s'y trouve)

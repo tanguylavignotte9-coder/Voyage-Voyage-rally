@@ -1,4 +1,4 @@
-import { CarState, OrganId, TerrainSegment, World, WeatherFront, Station, StationWork, TICKS_PER_HOUR, TRUCK_FIXED_HOURS } from "./types";
+import { CarState, OrganId, TerrainSegment, World, WeatherFront, Station, StationWork, TICKS_PER_HOUR, TICKS_PER_SECOND, TRUCK_FIXED_HOURS } from "./types";
 import {
   BASE_SPEED_KMH, PACE_SPEED_FACTOR, TERRAIN_SPEED_KMH, PACE_CONSUMPTION_FACTOR,
   FUEL_BASE_L_PER_100KM, FUEL_TERRAIN_FACTOR, RISK_CONSUMPTION_FACTOR, WEIGHT_SPEED_PENALTY_FULL,
@@ -13,7 +13,7 @@ import { segmentAt, nextStation, weatherAt } from "./world";
 import { Rng } from "./rng";
 import { GameVariables, tickPlanner, ActiveEffects } from "./planner";
 
-export const TICK_SECONDS = 1;
+export const TICK_SECONDS = 1 / 30;
 
 export function darknessFactor(hourOfDay: number): number {
   if (hourOfDay >= 21 || hourOfDay < 5) return 1.0;
@@ -236,8 +236,8 @@ function tickCarInternal(car: CarState, ctx: SimContext, emit: (t: string) => vo
   wearUpdate(car, seg, weather, riskFactor, distanceDelta, ctx, emit);
   car.fatigue = Math.min(100, car.fatigue + fatigueRate * (TICK_SECONDS / 3600));
 
-  if (car.fatigue > 70 && ctx.tick % 3600 === 0) mental(car, ctx.tick, "Mes paupières sont lourdes…");
-  if (car.fatigue > 85 && ctx.tick % 1800 === 0) mental(car, ctx.tick, "Je lutte pour garder les yeux ouverts. C'est dangereux.");
+  if (car.fatigue > 70 && ctx.tick % TICKS_PER_HOUR === 0) mental(car, ctx.tick, "Mes paupières sont lourdes…");
+  if (car.fatigue > 85 && ctx.tick % (TICKS_PER_HOUR / 2) === 0) mental(car, ctx.tick, "Je lutte pour garder les yeux ouverts. C'est dangereux.");
 
   if (car.fuel <= 0) {
     car.immobilized = true;
@@ -324,7 +324,7 @@ function startStationWork(
 
   car.stopped = true;
   car.stopWork = work;
-  car.stopUntilTick = ctx.tick + Math.max(60, Math.round(hours * 3600));
+  car.stopUntilTick = ctx.tick + Math.max(TICKS_PER_SECOND, Math.round(hours * TICKS_PER_HOUR));
   work.endsAtTick = car.stopUntilTick;
   emit(
     `${car.playerId} s'arrête à ${station.name} — ravitaillement: ${work.fuelTarget !== null ? "oui" : "non"}, réparation: ${work.repairOrgan ?? "aucune"}, roue: ${work.replaceWheel ? "oui" : "non"}`
@@ -369,7 +369,7 @@ function tickImmobilized(car: CarState, ctx: SimContext, emit: (t: string) => vo
     emit(`${car.playerId} appelle le camion d'assistance`);
   }
   if (car.truckCalledTick === null) return;
-  const readyAt = car.truckCalledTick + TRUCK_FIXED_HOURS * 3600;
+  const readyAt = car.truckCalledTick + TRUCK_FIXED_HOURS * TICKS_PER_HOUR;
   if (ctx.tick < readyAt) return;
   const station = nextStation(ctx.world.stations, car.positionKm);
   car.truckCalledTick = null;
@@ -418,7 +418,7 @@ function applyTrafficEffects(
       if (car.overtaking !== "interdit" && seg.width !== "etroite") {
         const riskBase = car.overtaking === "agressif" ? 0.15 : 0.05;
         const defended = other.defending ? 0.3 : 0;
-        const p = ((riskBase + defended) / 3600) * (car.risk === "haut" ? 2 : car.risk === "bas" ? 0.3 : 1);
+        const p = (riskBase + defended) * TICK_SECONDS * (car.risk === "haut" ? 2 : car.risk === "bas" ? 0.3 : 1);
         if (ctx.rng.chance(p)) {
           car.stats.depassements++;
           emit(`${car.playerId} dépasse ${other.playerId} !`);
