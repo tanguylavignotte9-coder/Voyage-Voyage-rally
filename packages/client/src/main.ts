@@ -1072,28 +1072,6 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     };
     drawBand(roadWm + 1.6, "rgba(180,160,120,0.5)"); // accotement
     drawBand(roadWm, "#6b5b43");                      // piste
-    // ORNIÈRES: deux traces de roues sombres — lecture immédiate de la vitesse
-    const trackOffset = roadWm * 0.45;
-    for (const side of [-1, 1]) {
-      ctx.strokeStyle = "rgba(40,32,22,0.35)";
-      ctx.lineWidth = 0.55 * PXM;
-      ctx.beginPath();
-      // traces en offset latéral — portée de lecture (±60 m; au-delà elles
-      // ressemblent à des lignes parasites le long de la route)
-      const halfTrack = Math.min(half, 0.06);
-      let first = true;
-      for (let k2 = km - halfTrack; k2 <= km + halfTrack; k2 += 0.002) {
-        const pp = pathPoint(k2);
-        const pa = pathPoint(k2 - 0.002), pb = pathPoint(k2 + 0.002);
-        if (!pp || !pa || !pb) continue;
-        const a = Math.atan2(pb.y - pa.y, pb.x - pa.x);
-        const ox = pp.x - Math.sin(a) * trackOffset * side;
-        const oy = pp.y + Math.cos(a) * trackOffset * side;
-        const [sx, sy] = W2S(ox, oy);
-        if (first) { ctx.moveTo(sx, sy); first = false; } else ctx.lineTo(sx, sy);
-      }
-      ctx.stroke();
-    }
     // LIGNE CENTRALE ancrée au monde: le motif pointillé démarre à des
     // positions de tracé en MÈTRES ARRONDIS (multiples de 7 m = période du
     // motif 3+4). La voiture avance, le motif reste fixe sur la route.
