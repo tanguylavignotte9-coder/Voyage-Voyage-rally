@@ -1,0 +1,5 @@
+node_modules/
+packages/*/dist/
+packages/server/public/app.js
+data/
+*.log

@@ -114,7 +114,7 @@ wss.on("connection", (ws) => {
 
     switch (msg.type) {
       case "join": {
-        if (host.race.tick > host.race.raceStartTick + host.race.params.startIntervalSeconds * host.race.cars.length) {
+        if (host.race.started) {
           ws.send(JSON.stringify({ type: "error", text: "Inscriptions fermées" }));
           return;
         }

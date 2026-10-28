@@ -28,6 +28,7 @@ export class Race {
   rng: Rng;
   tick = 0;
   raceStartTick = 0;
+  started = false;
   paused = false;
   finished = false;
   events: { tick: number; text: string }[] = [];
@@ -85,6 +86,7 @@ export class Race {
   }
 
   start(): void {
+    this.started = true;
     const order = [...this.cars];
     for (let i = 0; i < order.length; i++) {
       order[i].offsetSeconds = i * this.params.startIntervalSeconds;
@@ -109,7 +111,7 @@ export class Race {
     this.tick++;
     const allEvents: string[] = [];
     const ctx = this.ctxFor();
-    const started = this.tick > this.raceStartTick;
+    const started = this.started;
     if (!started) return [];
     for (const car of this.cars) {
       if (this.tick - this.raceStartTick < car.offsetSeconds) continue;
