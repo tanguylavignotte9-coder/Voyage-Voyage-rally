@@ -34,6 +34,7 @@ export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string
   if (seg.slope > 0) v *= Math.max(0.5, 1 - seg.slope * 0.015);
   else if (seg.slope < -1) v *= 1.03;
   if (weather === "tempete_sable" || weather === "pluie_diluvienne") v *= 0.35;
+  if (weather === "piste_endommagee") v *= 0.5;
   else if (weather === "brouillard" || weather === "grele" || weather === "vent_fort") v *= 0.55;
   else if (weather === "canicule" || weather === "froid_intense") v *= 0.85;
   v *= 1 - darkness * 0.3;

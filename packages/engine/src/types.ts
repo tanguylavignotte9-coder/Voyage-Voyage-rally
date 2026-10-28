@@ -13,6 +13,7 @@ export type TerrainType =
 
 export type WeatherKind =
   | "clair"
+  | "piste_endommagee"
   | "pluie_diluvienne"
   | "tempete_sable"
   | "canicule"

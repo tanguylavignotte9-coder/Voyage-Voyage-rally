@@ -773,6 +773,29 @@
       m.fillStyle = "#ddd";
       m.fillText("\u{1F3E0}", v.km / total * w - 5, profileY(3e3) + 40);
     });
+    const FRONT_COLORS = {
+      pluie_diluvienne: "rgba(80,120,220,0.35)",
+      tempete_sable: "rgba(210,160,80,0.4)",
+      canicule: "rgba(230,120,40,0.25)",
+      froid_intense: "rgba(160,200,255,0.3)",
+      brouillard: "rgba(200,200,200,0.3)",
+      vent_fort: "rgba(150,180,160,0.25)",
+      grele: "rgba(190,210,255,0.4)",
+      piste_endommagee: "rgba(120,60,40,0.5)"
+    };
+    for (const f of state.fronts ?? []) {
+      if (state.tick < f.startTick || state.tick > f.endTick) continue;
+      const color = FRONT_COLORS[f.kind] ?? "rgba(150,150,150,0.3)";
+      m.fillStyle = color;
+      const fx = f.km / total * w;
+      const fr = Math.max(4, f.radiusKm / total * w);
+      m.beginPath();
+      m.arc(fx, h / 2, fr, 0, Math.PI * 2);
+      m.fill();
+      m.fillStyle = "#fff";
+      m.font = "10px sans-serif";
+      m.fillText(WEATHER_ICON[f.kind] ?? "?", fx - 6, h / 2 - 6);
+    }
     state.cars.forEach((c) => {
       const x = c.positionKm / total * w;
       const y = profileY(altAt(c.positionKm)) - 8;
@@ -1213,6 +1236,15 @@
     ctx.fillText(`${spd.toFixed(0)} km/h`, 12, h - 11);
     ctx.fillText(`${WEATHER_ICON[weather] ?? ""} ${WEATHER_FR[weather] ?? weather}`, 100, h - 11);
     ctx.fillText(`${(myPub?.positionKm ?? 0).toFixed(1)} km`, w - 110, h - 11);
+    if (myPub && state?.fronts) {
+      const myKm = myPub.positionKm;
+      const in12h = state.fronts.filter(
+        (f) => f.kind !== "piste_endommagee" && f.startTick <= state.tick + 12 * 3600 && f.endTick >= state.tick && Math.abs(f.km - myKm) < f.radiusKm + 120
+      );
+      if (in12h.length > 0) {
+        ctx.fillText(`Pr\xE9vision 12 h : ${in12h.slice(0, 2).map((f) => WEATHER_FR[f.kind] ?? f.kind).join(", ")}`, 260, h - 11);
+      }
+    }
     const wx = $("weather");
     if (wx) wx.textContent = `${WEATHER_ICON[weather] ?? ""} ${WEATHER_FR[weather] ?? ""}`;
     if (state.paused || !state.started) {
@@ -1247,6 +1279,17 @@
       color: $("f_color").value
     });
   });
+  var QUICK_REACTIONS = ["\u{1F44D}", "\u{1F602}", "\u{1F525}", "\u{1F62E}", "\u{1F4AA}", "\u{1FAE1}", "\u{1F3C1}", "\u{1F624}"];
+  var reactBar = document.createElement("div");
+  reactBar.style.cssText = "display:flex;gap:.2rem;margin:.2rem 0;flex-wrap:wrap";
+  for (const r of QUICK_REACTIONS) {
+    const b = document.createElement("button");
+    b.className = "small";
+    b.textContent = r;
+    b.onclick = () => send({ type: "chat", text: r });
+    reactBar.appendChild(b);
+  }
+  $("chatinput").insertAdjacentElement("beforebegin", reactBar);
   $("chatinput").addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       const input = e.target;

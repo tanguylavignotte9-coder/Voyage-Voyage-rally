@@ -159,31 +159,47 @@ export function nextStation(stations: Station[], km: number): Station | null {
   return null;
 }
 
+// Incidents crédibles par biome — « pas de neige dans le désert » (validé 2026-10-28).
+const FRONT_KINDS_BY_BIOME: Record<string, WeatherFront["kind"][]> = {
+  desert: ["tempete_sable", "canicule", "vent_fort", "brouillard"],
+  montagne: ["froid_intense", "grele", "pluie_diluvienne", "vent_fort", "brouillard"],
+  steppe: ["pluie_diluvienne", "vent_fort", "canicule", "brouillard", "grele"],
+  humide: ["pluie_diluvienne", "brouillard", "froid_intense", "vent_fort"],
+};
+
 export function generateWeatherFronts(world: World, rng: Rng, ticksPerHour: number): WeatherFront[] {
   const fronts: WeatherFront[] = [];
-  const kinds: WeatherFront["kind"][] = [
-    "pluie_diluvienne",
-    "tempete_sable",
-    "canicule",
-    "froid_intense",
-    "brouillard",
-    "vent_fort",
-    "grele",
-  ];
   let id = 1;
   const totalTicks = (world.totalKm / AVG_SPEED_KMH) * ticksPerHour;
   for (let t = 0; t < totalTicks; t += rng.int(3600, 14400)) {
+    const km = rng.range(0, world.totalKm);
+    const biome = segmentAt(world.segments, km).biome;
+    const kinds = FRONT_KINDS_BY_BIOME[biome] ?? ["pluie_diluvienne", "vent_fort"];
     fronts.push({
       id: id++,
       kind: rng.pick(kinds),
-      km: rng.range(0, world.totalKm),
+      km,
       speedKmPerTick: rng.range(-0.02, 0.02),
       radiusKm: rng.range(30, 100),
       startTick: t,
       endTick: t + rng.int(3600, 14400),
     });
   }
-  return fronts;
+  // Sections de piste endommagée (événements-monde : frappent quiconque s'y trouve)
+  const damaged: WeatherFront[] = [];
+  for (let i = 0; i < Math.max(2, Math.floor(world.totalKm / 800)); i++) {
+    const km = rng.range(50, world.totalKm - 50);
+    damaged.push({
+      id: id++,
+      kind: "piste_endommagee" as any,
+      km,
+      speedKmPerTick: 0,
+      radiusKm: rng.range(1, 4),
+      startTick: 0,
+      endTick: Number.MAX_SAFE_INTEGER,
+    });
+  }
+  return fronts.concat(damaged);
 }
 
 export function weatherAt(

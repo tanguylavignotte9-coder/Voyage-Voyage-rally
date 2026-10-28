@@ -112,7 +112,12 @@ function stateMsg(forPlayerId: string | null): any {
     started: host.race.started,
     paused: host.race.paused,
     finished: host.race.finished,
-    world: host.race.world,
+    // Roadbook caché jusqu'à l'ouverture de la fenêtre de programmation (= premier joueur inscrit),
+    // puis visible par tous jusqu'à la fin de la course.
+    world: host.race.players.length > 0 ? host.race.world : null,
+    fronts: host.race.players.length > 0 ? host.race.fronts.map((f) => ({
+      id: f.id, kind: f.kind, km: f.km, radiusKm: f.radiusKm, startTick: f.startTick, endTick: f.endTick,
+    })) : [],
     cars: publicCars,
     standings: host.race.standings().map((c) => c.playerId),
     events: host.race.events.slice(-150),
