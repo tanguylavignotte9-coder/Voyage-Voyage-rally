@@ -73,27 +73,34 @@ class ValueNoise2D {
 }
 
 interface BiomeStyle {
-  // capacité de virage: rayon de braquage typique en mètres ( petit = épingles )
   minTurnRadius: number;
-  // variabilité de l'itinéraire de référence
   waypointJitter: number;
-  // fréquence des changements de terrain (en km)
   terrainChangeKm: number;
-  // probabilité d'un terrain lent par section
   slowChance: number;
-  // vitesse caractéristique du biome
   characterKmh: number;
-  // sinuosité: amplitude du serpentement (radians) et longueur d'onde (m)
-  // C'est ELLE qui fait les virages — une piste de raid ne va jamais droit.
-  windAmpRad: number;
-  windWavelengthM: number;
+  // Géométrie routière: la route = droites + virages en arcs.
+  straightMinM: number;   // longueur des lignes droites
+  straightMaxM: number;
+  angleMinDeg: number;    // déflexion des virages (60..180 = épingle)
+  angleMaxDeg: number;
+  radiusMinM: number;     // rayon des virages
+  radiusMaxM: number;
+  hairpinChance: number;  // probabilité d'une épingle (>120°) — les lacets
 }
 
 const BIOME_STYLES: Record<Biome, BiomeStyle> = {
-  montagne: { minTurnRadius: 35, waypointJitter: 2500, terrainChangeKm: 3, slowChance: 0.55, characterKmh: 45, windAmpRad: 0.9, windWavelengthM: 500 },
-  desert: { minTurnRadius: 80, waypointJitter: 6000, terrainChangeKm: 6, slowChance: 0.4, characterKmh: 75, windAmpRad: 0.7, windWavelengthM: 900 },
-  steppe: { minTurnRadius: 180, waypointJitter: 12000, terrainChangeKm: 10, slowChance: 0.25, characterKmh: 100, windAmpRad: 0.35, windWavelengthM: 2200 },
-  humide: { minTurnRadius: 50, waypointJitter: 3500, terrainChangeKm: 4, slowChance: 0.6, characterKmh: 50, windAmpRad: 0.8, windWavelengthM: 700 },
+  // montagne: cols en lacets — droites courtes, épingles fréquentes (jusqu'à 180°)
+  montagne: { minTurnRadius: 35, waypointJitter: 2500, terrainChangeKm: 3, slowChance: 0.55, characterKmh: 45,
+    straightMinM: 80, straightMaxM: 400, angleMinDeg: 40, angleMaxDeg: 180, radiusMinM: 20, radiusMaxM: 60, hairpinChance: 0.12 },
+  // désert: ondulations d'erg, virages amples mais fréquents
+  desert: { minTurnRadius: 80, waypointJitter: 6000, terrainChangeKm: 6, slowChance: 0.4, characterKmh: 75,
+    straightMinM: 150, straightMaxM: 900, angleMinDeg: 30, angleMaxDeg: 140, radiusMinM: 45, radiusMaxM: 160, hairpinChance: 0.03 },
+  // steppe: pistes rapides, longues droites, grandes courbes ouvertes
+  steppe: { minTurnRadius: 180, waypointJitter: 12000, terrainChangeKm: 10, slowChance: 0.25, characterKmh: 100,
+    straightMinM: 600, straightMaxM: 3000, angleMinDeg: 10, angleMaxDeg: 70, radiusMinM: 150, radiusMaxM: 500, hairpinChance: 0.02 },
+  // zone humide: piste technique qui contourne les marécages
+  humide: { minTurnRadius: 50, waypointJitter: 3500, terrainChangeKm: 4, slowChance: 0.6, characterKmh: 50,
+    straightMinM: 100, straightMaxM: 500, angleMinDeg: 35, angleMaxDeg: 160, radiusMinM: 25, radiusMaxM: 90, hairpinChance: 0.06 },
 };
 
 const TERRAIN_BY_BIOME: Record<Biome, [TerrainType, number][]> = {
@@ -194,85 +201,141 @@ export class WorldGenerator {
     return 80 + this.noise.fbm(x, y, 16000, 3) * 600;
   }
 
-  // ---------- construction du tracé par modèle de conducteur ----------
+  // ---------- construction du tracé: géométrie routière ----------
+  // La route est une SÉQUENCE D'ÉLÉMENTS: ligne droite -> arc de virage
+  // (avec transitions clothoïde) -> droite... comme une vraie route.
+  // Les tirages (longueurs, angles, rayons) suivent le style du biome;
+  // les waypoints donnent la direction générale (le tracé ne diverge pas).
   private buildPath(): void {
-    const STEP_M = 25;           // résolution du tracé: un point tous les 25 m
+    const STEP_M = 25;
     const totalM = this.totalKm * 1000;
-    // état du conducteur
-    let x = 0, y = 0;
-    let heading = 0;             // cap en radians
-    let km = 0;
-    let arcKm = 0;
-    let curvatureSmooth = 0;
 
-    // itinéraire de référence: série de waypoints que le conducteur cherche à rejoindre
+    let x = 0, y = 0;
+    let heading = 0;
+    let km = 0;
+
+    // waypoints: direction générale de l'itinéraire
     const waypoints: { x: number; y: number }[] = [];
-    let wx = 0, wy = 8000;
+    let wx = 0, wy = 6000;
     waypoints.push({ x: 0, y: 0 });
-    while (Math.hypot(wx, wy) < totalM * 0.98) {
-      const biome = this.biomeAt(Math.hypot(wx, wy) / 1000);
-      const style = BIOME_STYLES[biome];
-      const jitter = style.waypointJitter;
-      const angle = this.rng.range(-0.7, 0.7);
-      const dist = this.rng.range(3000, 9000);
+    while (Math.hypot(wx, wy) < totalM * 1.2) {
+      const angle = this.rng.range(-0.5, 0.5);
+      const dist = this.rng.range(5000, 12000);
       wx += Math.cos(angle) * dist;
-      wy += Math.sin(angle) * dist + this.rng.range(-jitter, jitter);
+      wy += Math.sin(angle) * dist;
       waypoints.push({ x: wx, y: wy });
     }
-
     let wpIdx = 0;
-    for (let d = 0; d < totalM; d += STEP_M) {
-      km = d / 1000; // position d'arc cible pour ce pas
-      const biome = this.biomeAt(km);
-      const style = BIOME_STYLES[biome];
 
-      // waypoint cible: le prochain à portée
+    // machine à éléments routiers
+    type Elem =
+      | { type: "straight"; lengthM: number }
+      | { type: "arc"; radiusM: number; deflectionRad: number; transM: number }; // transM: clothoïde
+    let elem: Elem = { type: "straight", lengthM: 0 };
+    let elemRemaining = 0;
+    let curvatureTarget = 0; // courbure visée (clothoïde la rejoint progressivement)
+    let curvature = 0;
+
+    const nextElem = (biome: Biome): Elem => {
+      const st = BIOME_STYLES[biome];
+      if (this.rng.chance(0.45)) {
+        return { type: "straight", lengthM: this.rng.range(st.straightMinM, st.straightMaxM) };
+      }
+      // virage: angle de déflexion, épingles possibles, rayon réaliste
+      let defl = this.rng.range(st.angleMinDeg, st.angleMaxDeg) * (Math.PI / 180);
+      const hairpin = this.rng.chance(st.hairpinChance);
+      if (hairpin) defl = Math.max(defl, this.rng.range(120, 180) * (Math.PI / 180));
+      const radius = this.rng.range(st.radiusMinM, st.radiusMaxM);
+      // clothoïde: transition sur ~40 m (entrée/sortie du virage)
+      return { type: "arc", radiusM: radius, deflectionRad: defl, transM: 40 };
+    };
+
+    let biome = this.biomeAt(0);
+    elem = nextElem(biome);
+    let arcRemainingRad = 0;   // rotation restante de l'arc courant
+    let straightRemainingM = 0;
+
+    const startElem = () => {
+      if (elem.type === "straight") {
+        straightRemainingM = elem.lengthM;
+      } else {
+        arcRemainingRad = Math.abs(elem.deflectionRad);
+      }
+    };
+    startElem();
+
+    let done = 0;
+    while (done < totalM) {
+      const step = Math.min(STEP_M, totalM - done);
+      km = done / 1000;
+      biome = this.biomeAt(km);
+
+      // direction générale: corriger le sens du virage à venir si on dévie du waypoint
       while (wpIdx < waypoints.length - 1 &&
-             Math.hypot(waypoints[wpIdx].x - x, waypoints[wpIdx].y - y) < 2000) {
+             Math.hypot(waypoints[wpIdx].x - x, waypoints[wpIdx].y - y) < 2500) {
         wpIdx++;
       }
       const target = waypoints[Math.min(wpIdx, waypoints.length - 1)];
       const toTarget = Math.atan2(target.y - y, target.x - x);
 
-      // Sinuosité: serpentement du tracé en fonction de l'arc — les VIRAGES.
-      // Amplitude et longueur d'onde par biome: épingles de montagne, grandes
-      // courbes de steppe. Le conducteur suit ce cap sinueux dans la limite
-      // de sa capacité de virage.
-      const wind = (this.noise.fbm(d, d * 0.5, style.windWavelengthM, 2) - 0.5) * 2 * style.windAmpRad;
+      // élément suivant quand le courant est épuisé
+      const exhausted = elem.type === "straight" ? straightRemainingM <= 0 : arcRemainingRad <= 0;
+      if (exhausted) {
+        elem = nextElem(biome);
+        if (elem.type === "arc") {
+          let err = toTarget - heading;
+          while (err > Math.PI) err -= 2 * Math.PI;
+          while (err < -Math.PI) err += 2 * Math.PI;
+          if (err > 0.25) elem.deflectionRad = Math.abs(elem.deflectionRad);
+          else if (err < -0.25) elem.deflectionRad = -Math.abs(elem.deflectionRad);
+          else elem.deflectionRad = this.rng.chance(0.5) ? Math.abs(elem.deflectionRad) : -Math.abs(elem.deflectionRad);
+        }
+        startElem();
+      }
 
-      // cap désiré: direction générale (waypoint) + sinuosité locale
-      let desired = toTarget + wind;
-      // normalisation de l'écart de cap
-      let err = desired - heading;
-      while (err > Math.PI) err -= 2 * Math.PI;
-      while (err < -Math.PI) err += 2 * Math.PI;
+      // courbure visée: 0 sur une droite, ±1/r dans un arc (jusqu'à épuisement de la déflexion)
+      let curvatureTarget: number;
+      if (elem.type === "straight") {
+        curvatureTarget = 0;
+        straightRemainingM -= step;
+      } else {
+        const c = (1 / elem.radiusM) * Math.sign(elem.deflectionRad);
+        // clothoïde: n'entamer la rotation qu'après convergence; borne par la déflexion restante
+        const maxTurn = Math.abs(c) * step;
+        const turn = Math.min(maxTurn, arcRemainingRad * Math.sign(elem.deflectionRad) * Math.sign(c) || maxTurn);
+        curvatureTarget = c;
+        arcRemainingRad -= Math.min(arcRemainingRad, Math.abs(c * step));
+      }
 
-      // capacité de virage: rayon min du biome, un peu de variance
-      const minRadius = style.minTurnRadius * this.rng.range(0.8, 1.5);
-      const maxCurv = 1 / minRadius;
-      // le conducteur tourne au maximum vers le cap désiré
-      const turn = Math.max(-maxCurv * STEP_M, Math.min(maxCurv * STEP_M, err));
-      const curvature = turn / STEP_M;
-      heading += turn;
+      // convergence progressive (clothoïde) de la courbure réelle vers la cible
+      const prevCurvature = curvature;
+      curvature += (curvatureTarget - curvature) * Math.min(1, step / 35);
+      // BORNE STRICTE: la rotation de cet arc ne dépasse JAMAIS sa déflexion.
+      // heading consomme arcRemainingRad directement.
+      let turnDelta = curvature * step;
+      if (elem.type === "arc") {
+        const maxTurn = Math.abs(arcRemainingRad);
+        if (Math.abs(turnDelta) > maxTurn) turnDelta = maxTurn * Math.sign(turnDelta || 1);
+        arcRemainingRad -= Math.abs(turnDelta);
+      }
+      heading += turnDelta;
 
-      // lissage de la courbure (suspension du modèle)
-      curvatureSmooth = curvatureSmooth * 0.45 + curvature * 0.55;
-
-      x += Math.cos(heading) * STEP_M;
-      y += Math.sin(heading) * STEP_M;
+      x += Math.cos(heading) * step;
+      y += Math.sin(heading) * step;
+      done += step;
 
       const alt = this.landscapeAlt(x, y, biome);
       const prev = this.points[this.points.length - 1];
-      const slope = prev ? ((alt - prev.alt) / STEP_M) * 1000 : 0;
+      const slope = prev ? ((alt - prev.alt) / step) * 1000 : 0;
+
       this.points.push({
-        x,                        // position 2D réelle
-        y,
-        km: km + STEP_M / 1000,
+        x, y,
+        km: km + step / 1000,
         alt,
         slopePermille: slope,
-        curvature: curvatureSmooth,
+        curvature: (prevCurvature + curvature) / 2,
         biome,
-        terrain: "piste_moyenne", // assigné ensuite
+        terrain: "piste_moyenne",
         width: "moyenne",
       });
     }
