@@ -134,18 +134,25 @@ export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string
     v = v + (vNext - v) * CONVERGENCE_DAMPING;
     if (Math.abs(vNext - v) < CONVERGENCE_EPS) break;
   }
-  // état moteur exposé (HUD pédales/régime/rapport)
+  // le virage borne par la physique (pas un cap arbitraire: c'est l'adhérence)
+  const vWish = v; // équilibre moteur avant limites (sert à l'affichage du frein)
+  if (vTurnEff < v) v = vTurnEff;
+  // remorquage: force supplémentaire (on tire une autre auto)
+  if (car.towedBy) v *= TOWING_SPEED_FACTOR;
+  // état moteur exposé (HUD pédales/régime/rapport) — calculé sur la vitesse
+  // RÉELLEMENT tenue (après les limites physiques). Avant, ce bloc lisait
+  // l'équilibre moteur: le régime paraissait figé pendant que la vitesse
+  // variait, et le frein n'existait qu'en descente.
   {
     const gi = gearFor(v);
     car.gear = gi + 1;
     car.rpm = Math.max(ENGINE_IDLE_RPM, v / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI));
     car.throttle = Math.min(1, throttleShare);
-    car.brake = slopeFrac < -0.015 ? Math.min(1, -slopeFrac * 8) : 0;
+    // frein affiché: descente (frein moteur) OU lever de pied exigé par le virage
+    const brakeSlope = slopeFrac < -0.015 ? Math.min(1, -slopeFrac * 8) : 0;
+    const brakeCurve = vWish > 20 && v < vWish ? Math.min(1, ((vWish - v) / vWish) * 3) : 0;
+    car.brake = Math.max(brakeSlope, brakeCurve);
   }
-  // le virage borne par la physique (pas un cap arbitraire: c'est l'adhérence)
-  if (vTurnEff < v) v = vTurnEff;
-  // remorquage: force supplémentaire (on tire une autre auto)
-  if (car.towedBy) v *= TOWING_SPEED_FACTOR;
   return Math.max(0, v * 3.6); // m/s -> km/h
 }
 
@@ -651,7 +658,13 @@ export function applyTrafficEffects(
         (o) =>
           o.positionKm - car.positionKm > 0 &&
           o.positionKm - car.positionKm < OVERTAKE_GAP_MAX_KM &&
-          o.speedKmh < car.speedKmh * DUST_SPEED_FACTOR &&
+          // "plus lent que moi" se juge sur la vitesse DEMANDÉE ce tick (le
+          // paramètre speed), pas sur car.speedKmh: dans le sillage, la vitesse
+          // d'État est plafonnée à celle du rival, et l'ancien filtre se
+          // désarmait après un premier refus de fenêtre — plus jamais de
+          // candidat, donc plus jamais de ré-engagement quand la fenêtre
+          // s'ouvrait (3 tests de dépassement passés en échec).
+          o.speedKmh < speed * DUST_SPEED_FACTOR &&
           !blockedIds.has(o.playerId)
       );
       if (candidates.length > 0) {
@@ -664,7 +677,13 @@ export function applyTrafficEffects(
         // permet de TERMINER le dépassement (pas de segment étroit, pas de
         // virage trop fort). Sinon on attend dans le sillage — le moment
         // opportun existe, il suffit de le lire sur le tracé.
-        const fenetre = candidate.immobilized
+        // pas de duel possible sous 10 km/h (garde d'accrochage du modèle):
+        // une cible quasi à l'arrêt est un OBSTACLE à contourner, pas un
+        // rival — la fenêtre ne s'y applique pas (l'accrochage est de toute
+        // façon impossible avec elle). Sans cette exemption, le doublard
+        // gelait à 0 km/h derrière une voiture à l'arrêt, à position figée:
+        // fenêtre figée, boucle sans issue.
+        const fenetre = candidate.immobilized || candidate.speedKmh < 10
           ? null
           : roadAhead(ctx.world, car.positionKm, OVERTAKE_LOOKAHEAD_KM);
         const fenetreOk =

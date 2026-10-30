@@ -4,7 +4,7 @@ import { generateWorld, roadAhead } from "./world";
 import { Rng, seedFromString } from "./rng";
 import { Race, PRIME_HOUR } from "./race";
 import { darknessFactor, computeSpeed, applyTrafficEffects, resolveContactFault, SimContext, TICK_SECONDS } from "./sim";
-import { CAR_LEN_M } from "./calibration";
+import { CAR_LEN_M, GEAR_RATIOS, GEAR_FINAL_DRIVE, WHEEL_RADIUS_M, ENGINE_IDLE_RPM, ENGINE_REDLINE_RPM } from "./calibration";
 import { CarState, DEFAULT_RULES, TICKS_PER_HOUR } from "./types";
 
 test("déterminisme: même graine = même monde", () => {
@@ -344,4 +344,39 @@ test("conscience: on attend la fenêtre ouverte pour s'engager", () => {
   const passant = drive(0.5, 2700);
   assert.equal(passant.stats.depassements, 1, "fenêtre ouverte: le dépassement se fait");
   assert.equal(passant.maneuver, null, "manœuvre terminée");
+});
+
+// ========== HUD MOTEUR: régime et rapport suivent la vitesse tenue ==========
+
+test("hud moteur: régime et rapport suivent la vitesse réellement tenue", () => {
+  const mkW = (curv: number) => ({
+    segments: [{ km: 0, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "large" }],
+    points: Array.from({ length: 60 }, (_, i) => ({ km: (i * 20) / 1000, x: 0, y: 0, z: 0, curvature: curv })),
+  }) as any;
+  const seg = mkW(0).segments[0];
+  // référence: même voiture, même piste, en ligne droite
+  const carF = mkCar("attaque");
+  carF.positionKm = 0.6;
+  const vFree = computeSpeed(carF, seg, "clair", 0, mkW(0));
+  // même situation, mais un virage fort (courbure brute 0,01 -> normalisée 0,9)
+  const carC = mkCar("attaque");
+  carC.positionKm = 0.6;
+  const v = computeSpeed(carC, seg, "clair", 0, mkW(0.01));
+  assert.ok(v < vFree, `le virage bride la vitesse (v=${v.toFixed(0)} < vFree=${vFree.toFixed(0)})`);
+  // rapport et régime exposés = ceux de la vitesse TENUE, pas du souhait moteur
+  const vMs = v / 3.6;
+  let gi = 0;
+  for (let g2 = 0; g2 < GEAR_RATIOS.length; g2++) {
+    const r = (vMs / WHEEL_RADIUS_M) * 60 * GEAR_RATIOS[g2] * GEAR_FINAL_DRIVE / (2 * Math.PI);
+    if (r <= ENGINE_REDLINE_RPM * 0.98) gi = g2;
+  }
+  while (gi > 0) {
+    const r = (vMs / WHEEL_RADIUS_M) * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI);
+    if (r >= ENGINE_IDLE_RPM) break;
+    gi--;
+  }
+  const expected = Math.max(ENGINE_IDLE_RPM, (vMs / WHEEL_RADIUS_M) * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI));
+  assert.equal(carC.gear, gi + 1, "rapport affiché = rapport tenu");
+  assert.ok(Math.abs(carC.rpm - expected) < 1, `régime affiché = régime tenu (${carC.rpm.toFixed(0)} vs ${expected.toFixed(0)})`);
+  assert.ok(carC.brake > 0, "lever de pied affiché dans le virage");
 });

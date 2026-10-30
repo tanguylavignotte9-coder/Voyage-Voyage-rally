@@ -112,19 +112,19 @@ function connect(): void {
       return;
     }
     if (msg.type === "state") {
-      const myOld = state?.cars.find((c) => c.playerId === myId);
       msg.pathChunk = pathChunks;
       state = msg;
       const myNew = state.cars.find((c) => c.playerId === myId);
       if (myNew) {
-        lastKnownKm = myNew.positionKm;
+        // anti-saccade: le serveur émet un état ~toutes les 500 ms mais la
+        // position n'avance qu'une fois par tick (1 s). On ne re-ancre
+        // l'extrapolation QUE sur un état qui a fait progresser la voiture —
+        // ré-ancrer sur un doublon ramène le rendu en arrière ("rollback").
         lastKnownSpeed = myNew.speedKmh;
-        lastStateTime = performance.now();
-        if (myOld) {
-          const dKm = myNew.positionKm - myOld.positionKm;
-          const elapsed = Math.max(0.001, (performance.now() - lastStateTime) / 1000);
+        if (lastStateTime === 0 || myNew.positionKm > lastKnownKm) {
+          lastKnownKm = myNew.positionKm;
+          lastStateTime = performance.now();
         }
-        extrapolatedKm = myNew.positionKm;
       }
       updateUI();
     } else if (msg.type === "joined") {
@@ -162,7 +162,10 @@ function updateUI(): void {
   $("budget").textContent = `💰 ${(car?.budget ?? 0).toFixed(0)}`;
 
   const pausedEl = $("paused");
-  pausedEl.classList.toggle("hidden", !state.paused && state.started);
+  // bandeau de pause VRAIE uniquement (course partie ET en pause): jamais
+  // pendant l'attente du départ, où il s'affichait à tort et recouvrait la
+  // barre contenant le bouton Départ.
+  pausedEl.classList.toggle("hidden", !(state.paused && state.started));
   $("btn-results").classList.toggle("hidden", !state.finished);
 
   updateStandings();
@@ -1420,10 +1423,17 @@ function render(): void {
   const h = (cv.height = cv.clientHeight);
   const car = myCar();
   const myPub = state.cars.find((c) => c.playerId === myId);
-  // extrapolation 60 fps: entre les states serveur (500 ms), on avance selon la vitesse
-  if (lastKnownSpeed > 0) {
+  // extrapolation 60 fps + LISSAGE: la cible avance depuis la dernière ancre
+  // ayant réellement progressé; le point de rendu poursuit sa cible (constante
+  // ~100 ms) pour absorber les à-coups de vitesse, et se téléporte au-delà de
+  // 100 m (arrêt en station, remorquage) au lieu de filmer un rattrapage.
+  {
     const dtS = (performance.now() - lastStateTime) / 1000;
-    extrapolatedKm = lastKnownKm + (lastKnownSpeed * dtS) / 3600;
+    const targetKm = lastKnownSpeed > 0
+      ? lastKnownKm + (lastKnownSpeed * dtS) / 3600
+      : (myPub?.positionKm ?? lastKnownKm);
+    if (extrapolatedKm === 0 || Math.abs(targetKm - extrapolatedKm) > 0.1) extrapolatedKm = targetKm;
+    else extrapolatedKm += (targetKm - extrapolatedKm) * Math.min(1, dt * 10);
   }
   const km = myPub ? (lastKnownSpeed > 0 ? extrapolatedKm : myPub.positionKm) : 0;
   const seg = state.world.segments[Math.min(state.world.segments.length - 1, Math.floor(km / 25))];
@@ -1440,13 +1450,19 @@ function render(): void {
   ctx.font = "13px sans-serif";
   const spd = myPub?.speedKmh ?? 0;
   ctx.fillText(`${spd.toFixed(0)} km/h`, 12, h - 11);
+  // bandeau bas: positionnement dynamique — chaque texte suit la largeur
+  // MESURÉE du précédent (l'allure écrasait la météo en x fixe).
+  let bandX = 12 + ctx.measureText(`${spd.toFixed(0)} km/h`).width + 14;
   const paceTxt = PACE_FR[myCar()?.pace ?? ""] ?? "";
   if (paceTxt) {
     ctx.fillStyle = (myCar()?.pace === "attaque" || myCar()?.pace === "soutenue") ? "#7c7" : "#cc7";
-    ctx.fillText(`Allure : ${paceTxt}`, 90, h - 11);
+    ctx.fillText(`Allure : ${paceTxt}`, bandX, h - 11);
     ctx.fillStyle = "#efe8dc";
+    bandX += ctx.measureText(`Allure : ${paceTxt}`).width + 14;
   }
-  ctx.fillText(`${WEATHER_ICON[weather] ?? ""} ${WEATHER_FR[weather] ?? weather}`, 100, h - 11);
+  const wxTxt = `${WEATHER_ICON[weather] ?? ""} ${WEATHER_FR[weather] ?? weather}`;
+  ctx.fillText(wxTxt, bandX, h - 11);
+  bandX += ctx.measureText(wxTxt).width + 14;
   ctx.fillText(`${(myPub?.positionKm ?? 0).toFixed(1)} km`, w - 110, h - 11);
   // Prévision ~12 h : fronts qui toucheront ma position (annonce, précis à 12 h)
   if (myPub && state?.fronts) {
@@ -1455,14 +1471,15 @@ function render(): void {
       (f) => f.kind !== "piste_endommagee" && f.startTick <= state.tick + 12 * 3600 && f.endTick >= state.tick && Math.abs(f.km - myKm) < f.radiusKm + 120
     );
     if (in12h.length > 0) {
-      ctx.fillText(`Prévision 12 h : ${in12h.slice(0, 2).map((f) => WEATHER_FR[f.kind] ?? f.kind).join(", ")}`, 260, h - 11);
+      const prevTxt = `Prévision 12 h : ${in12h.slice(0, 2).map((f) => WEATHER_FR[f.kind] ?? f.kind).join(", ")}`;
+      if (bandX + ctx.measureText(prevTxt).width < w - 120) ctx.fillText(prevTxt, bandX, h - 11);
     }
   }
   // ===== HUD CONDUITE: rapport + compte-tours + pédales =====
   {
     const car = myCar();
     if (car) {
-      const bw = 220, bh = 86, bx = w - bw - 12, by = h - 30 - bh - 8;
+      const bw = 220, bh = 96, bx = w - bw - 12, by = h - 30 - bh - 8;
       ctx.fillStyle = "rgba(30,26,20,0.8)";
       ctx.fillRect(bx, by, bw, bh);
       ctx.strokeStyle = "#555";
@@ -1483,17 +1500,19 @@ function render(): void {
       ctx.fillStyle = rpmShare > 0.85 ? "#e55" : "#d9a441";
       ctx.fillRect(bx + 10, by + 32, (bw - 20) * rpmShare, 8);
       // pédales: accélérateur (vert) / frein (rouge)
+      // pédales plus basses, étiquettes AU-DESSUS: le texte 9px débordait
+      // auparavant sur la barre de régime (superposition ACCÉL/FREIN + tr/min)
       ctx.fillStyle = "#241f19";
-      ctx.fillRect(bx + 10, by + 48, (bw - 30) / 2, 12);
-      ctx.fillRect(bx + bw / 2 + 5, by + 48, (bw - 30) / 2, 12);
+      ctx.fillRect(bx + 10, by + 56, (bw - 30) / 2, 12);
+      ctx.fillRect(bx + bw / 2 + 5, by + 56, (bw - 30) / 2, 12);
       ctx.fillStyle = "#7c7";
-      ctx.fillRect(bx + 10, by + 48, ((bw - 30) / 2) * Math.min(1, car.throttle), 12);
+      ctx.fillRect(bx + 10, by + 56, ((bw - 30) / 2) * Math.min(1, car.throttle), 12);
       ctx.fillStyle = "#c55";
-      ctx.fillRect(bx + bw / 2 + 5, by + 48, ((bw - 30) / 2) * Math.min(1, car.brake), 12);
+      ctx.fillRect(bx + bw / 2 + 5, by + 56, ((bw - 30) / 2) * Math.min(1, car.brake), 12);
       ctx.fillStyle = "#aaa";
       ctx.font = "9px sans-serif";
-      ctx.fillText("ACCÉL", bx + 10, by + 44);
-      ctx.fillText("FREIN", bx + bw / 2 + 5, by + 44);
+      ctx.fillText("ACCÉL", bx + 10, by + 52);
+      ctx.fillText("FREIN", bx + bw / 2 + 5, by + 52);
       // direction: braquage = tangente(+12m) - tangente(-12m) le long du tracé
       const pA2 = pathPoint(km - 0.012), pB2 = pathPoint(km + 0.012);
       if (pA2 && pB2) {
@@ -1521,12 +1540,12 @@ function render(): void {
   const wx = $("weather");
   if (wx) wx.textContent = `${WEATHER_ICON[weather] ?? ""} ${WEATHER_FR[weather] ?? ""}`;
 
-  if (state.paused || !state.started) {
+  if (!state.started) {
     ctx.fillStyle = "rgba(0,0,0,0.55)";
     ctx.fillRect(0, 0, w, 40);
     ctx.fillStyle = "#fff";
     ctx.font = "16px sans-serif";
-    ctx.fillText(state.paused ? "⏸ Course en pause — éditez vos règles librement" : "⏳ En attente du départ…", 12, 26);
+    ctx.fillText("⏳ En attente du départ…", 12, 26);
   }
 
   updateAudio(myPub, weather, dark);
