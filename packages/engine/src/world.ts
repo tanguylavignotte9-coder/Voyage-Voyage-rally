@@ -7,6 +7,8 @@ import {
 } from "./calibration";
 import { Biome, Station, TerrainSegment, TerrainType, World, WeatherFront } from "./types";
 
+export type TrackWidth = "large" | "moyenne" | "etroite";
+
 export interface WorldGenParams {
   seed: number;
   targetHours: number;
@@ -101,10 +103,10 @@ export interface PathPoint {
   km: number;            // longueur d'arc cumulée
   alt: number;           // m
   slopePermille: number;  // pente le long de la route (‰)
-  curvature: number;     // 1/m, signée
+  curvature: number;     // 1/m, signé
   biome: Biome;
   terrain: TerrainType;
-  width: "large" | "moyenne" | "etroite";
+  width: TrackWidth;
 }
 
 export interface BiomeZone { startKm: number; endKm: number; biome: Biome; }
@@ -558,14 +560,20 @@ export class WorldGenerator {
         slopeSum += p.slopePermille;
       }
       const terrain = Object.entries(terrainCounts).sort((a, b) => b[1] - a[1])[0][0] as TerrainType;
-      const widths = pts.map((p) => p.width).sort();
+      // LARGEUR: la médiane des points écrase l'information (tous les segments
+      // tombaient "large", la largeur n'existait pas). On agrège la SINUOSITÉ
+      // moyenne du segment: une section qui serpente est une piste étroite
+      // (pas de place pour deux voitures), une section modérément sinueuse
+      // est "moyenne" (on passe au cordeau), une section rapide est "large".
+      const meanAbsCurv = curvSum / pts.length;
+      const width: TrackWidth = meanAbsCurv > 0.0055 ? "etroite" : meanAbsCurv > 0.003 ? "moyenne" : "large";
       this.segments.push({
         km: start,
         biome: pts[0].biome,
         terrain,
         altitude: altSum / pts.length,
         slope: slopeSum / pts.length,
-        width: widths[Math.floor(widths.length / 2)] as any,
+        width,
       });
     }
   }
@@ -607,6 +615,24 @@ export function curvatureAt(world: World, km: number, window = 0.12): number {
   }
   if (n === 0) return 0;
   return Math.min(1, (sum / n) / (1 / 90));
+}
+
+export function curvatureSignedAt(world: World, km: number, window = 0.12): number {
+  // Moyenne SIGNÉE de la courbure sur ±120 m — même normalisation que
+  // curvatureAt (R=90 m → borne ±1), mais le signe dit le SENS du virage:
+  // > 0 = virage à GAUCHE, < 0 = virage à DROITE.
+  // Sert à la règle d'accrochage: la voiture À L'INTÉRIEUR possède la trajectoire.
+  const pts = world.points;
+  if (!pts || pts.length === 0) return 0;
+  const i0 = Math.max(0, Math.min(pts.length - 1, Math.floor(((km - window) * 1000) / STEP_M)));
+  const i1 = Math.max(0, Math.min(pts.length - 1, Math.floor(((km + window) * 1000) / STEP_M)));
+  let sum = 0, n = 0;
+  for (let i = i0; i <= i1 && i < pts.length; i++) {
+    sum += pts[i].curvature;
+    n++;
+  }
+  if (n === 0) return 0;
+  return Math.max(-1, Math.min(1, (sum / n) / (1 / 90)));
 }
 
 export function segmentAt(segments: TerrainSegment[], km: number): TerrainSegment {

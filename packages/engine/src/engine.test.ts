@@ -3,7 +3,8 @@ import assert from "node:assert";
 import { generateWorld } from "./world";
 import { Rng, seedFromString } from "./rng";
 import { Race, PRIME_HOUR } from "./race";
-import { darknessFactor, computeSpeed } from "./sim";
+import { darknessFactor, computeSpeed, applyTrafficEffects, resolveContactFault, SimContext, TICK_SECONDS } from "./sim";
+import { CAR_LEN_M } from "./calibration";
 import { CarState, DEFAULT_RULES, TICKS_PER_HOUR } from "./types";
 
 test("déterminisme: même graine = même monde", () => {
@@ -35,7 +36,7 @@ function mkCar(pace: any = "normale"): CarState {
     spareWheels: 1, budget: 1000, arrived: false, arrivalTime: null, finisherRank: null, forfait: false,
     allowAssist: true, immobilized: false, immobilizedReason: null, immobilizedUntil: null, truckCalledTick: null,
     crevaison: false, crevaisonOrgan: null, sleeping: 0, sleepPlace: null, stopped: false, stopUntilTick: null,
-    stopWork: null, overtaking: "prudent", defending: false, offsetSeconds: 0, dailyKm: 0, dayStartTick: 0,
+    stopWork: null, overtaking: "prudent", defending: false, offsetSeconds: 0, lateral: 0, maneuver: null, noPassUntilTick: 0, dailyKm: 0, dayStartTick: 0,
     dailyMaxSpeed: 0, mentalLog: [], towedBy: null, transactions: [],
     stats: { distance: 0, maxSpeed: 0, pannes: 0, depenses: 0, primes: 0, accidents: 0, depassements: 0 },
     gear: 1, rpm: 900, throttle: 0, brake: 0,
@@ -173,4 +174,113 @@ test("conso: intégration — une voiture économise réellement en descente", (
   assert.ok(cDown < cFlat * 0.85, `descente ${cDown.toFixed(2)} < plat ${cFlat.toFixed(2)}`);
   // et la descente reste plus rapide (le levier d'altitude du §4)
   assert.ok(computeSpeed(car, segDown, "clair", 0) > computeSpeed(car, segFlat, "clair", 0));
+});
+
+
+// ========== DÉPASSEMENT SPATIAL ==========
+
+test("en tort: en virage l'EXTÉRIEUR est en tort, sur ligne droite le doublard", () => {
+  const mkWorld = (curv: number) =>
+    ({ points: Array.from({ length: 400 }, () => ({ curvature: curv })), segments: [] }) as any;
+  const d = mkCar(); d.playerId = "d"; d.lateral = 2;   // déporté à gauche
+  const c = mkCar(); c.playerId = "c"; c.lateral = 0;   // à la corde
+  const gauche = { world: mkWorld(0.0025) } as any;      // virage à GAUCHE
+  const droite = { world: mkWorld(-0.0025) } as any;    // virage à DROITE
+  const ligneDroite = { world: mkWorld(0) } as any;
+  assert.equal(resolveContactFault(d, c, gauche).playerId, "c", "virage gauche: l'extérieur (c) en tort");
+  assert.equal(resolveContactFault(c, d, gauche).playerId, "c", "symétrique: même verdict quel que soit le point de vue");
+  assert.equal(resolveContactFault(d, c, droite).playerId, "d", "virage droite: le doublard extérieur en tort");
+  assert.equal(resolveContactFault(d, c, ligneDroite).playerId, "d", "ligne droite: le doublard en tort");
+  c.defending = true;
+  assert.equal(resolveContactFault(d, c, ligneDroite).playerId, "c", "ligne droite + défense active: le défenseur en tort");
+  c.defending = false;
+});
+
+function driveOvertake(width: "large" | "moyenne" | "etroite", overtaking: "prudent" | "agressif" | "interdit" = "prudent", seed = "overtake-test") {
+  const world = generateWorld({ seed: 42, targetHours: 10 });
+  const seg = world.segments.find((s) => s.width === width)!;
+  const km0 = seg.km + 0.5;
+  const doublard = mkCar("attaque");
+  doublard.playerId = "rapide"; doublard.positionKm = km0; doublard.speedKmh = 100;
+  doublard.overtaking = overtaking; doublard.risk = "bas";
+  const cible = mkCar("prudente");
+  cible.playerId = "lente"; cible.positionKm = km0 + 0.06; cible.speedKmh = 70;
+  const logs: { text: string; doublardKm: number; cibleKm: number }[] = [];
+  const ctx: SimContext = {
+    world, fronts: [], rng: new Rng(seedFromString(seed)), tick: 0, raceStartTick: 0,
+    started: true, hourOfDay: () => 10, allCars: [doublard, cible],
+    logGlobal: () => {},
+  };
+  for (let t = 0; t < 90 * 30 && (doublard.stats.depassements === 0 || doublard.maneuver !== null); t++) {
+    ctx.tick = t;
+    const vd = applyTrafficEffects(doublard, ctx, 100, 1, (txt) => logs.push({ text: txt, doublardKm: doublard.positionKm, cibleKm: cible.positionKm }));
+    doublard.speedKmh = vd;
+    doublard.positionKm += (vd / 3600) * TICK_SECONDS;
+    const vc = applyTrafficEffects(cible, ctx, 70, 1, () => {});
+    cible.speedKmh = vc;
+    cible.positionKm += (vc / 3600) * TICK_SECONDS;
+  }
+  return { doublard, cible, logs };
+}
+
+test("dépassement: franchissement RÉEL, loggé une seule fois, jamais derrière", () => {
+  const { doublard, logs } = driveOvertake("large");
+  assert.equal(logs.length, 1, "un seul log");
+  assert.ok(logs[0].text.includes("dépasse"));
+  assert.equal(doublard.stats.depassements, 1);
+  assert.ok(
+    logs[0].doublardKm > logs[0].cibleKm + CAR_LEN_M / 1000 - 1e-9,
+    "le log n'arrive qu'une longueur DEVANT la cible"
+  );
+  assert.equal(doublard.maneuver, null, "la manœuvre est terminée");
+});
+
+test("piste moyenne: la place existe réellement — dépassement possible", () => {
+  const { doublard, logs } = driveOvertake("moyenne");
+  assert.equal(logs.length, 1);
+  assert.equal(doublard.stats.depassements, 1);
+});
+
+test("piste étroite: file indienne, aucune manœuvre", () => {
+  const { doublard, cible, logs } = driveOvertake("etroite");
+  assert.equal(doublard.maneuver, null, "aucune manœuvre initiée");
+  assert.equal(logs.length, 0);
+  assert.equal(doublard.stats.depassements, 0);
+  assert.ok(doublard.positionKm < cible.positionKm, "toujours derrière");
+  assert.ok(doublard.speedKmh <= 70.5, "le suiveur colle à la vitesse du meneur");
+});
+
+test("dépassement interdit: jamais de manœuvre, jamais de franchissement fantôme", () => {
+  const { doublard, cible, logs } = driveOvertake("large", "interdit");
+  assert.equal(doublard.maneuver, null);
+  assert.equal(logs.length, 0);
+  assert.ok(doublard.positionKm < cible.positionKm, "sans manœuvre, on ne TRAVERSE jamais un rival");
+});
+
+test("accrochage: impossible contre une voiture à l'arrêt (bas-côté)", () => {
+  const world = generateWorld({ seed: 42, targetHours: 10 });
+  const seg = world.segments.find((s) => s.width === "large")!;
+  const doublard = mkCar("attaque");
+  doublard.playerId = "rapide"; doublard.positionKm = seg.km + 0.5; doublard.speedKmh = 100;
+  doublard.overtaking = "agressif"; doublard.risk = "haut";
+  const cible = mkCar("prudente");
+  cible.playerId = "arrete"; cible.positionKm = seg.km + 0.53; cible.speedKmh = 0; cible.stopped = true;
+  const logs: string[] = [];
+  const ctx: SimContext = {
+    world, fronts: [], rng: new Rng(seedFromString("arrete-test")), tick: 0, raceStartTick: 0,
+    started: true, hourOfDay: () => 10, allCars: [doublard, cible],
+    logGlobal: () => {},
+  };
+  for (let t = 0; t < 60 * 30 && doublard.stats.depassements === 0; t++) {
+    ctx.tick = t;
+    const vd = applyTrafficEffects(doublard, ctx, 100, 1, (txt) => logs.push(txt));
+    doublard.speedKmh = vd;
+    doublard.positionKm += (vd / 3600) * TICK_SECONDS;
+  }
+  assert.equal(doublard.stats.depassements, 1, "on dépasse la voiture en panne");
+  assert.equal(logs.filter((l) => l.includes("dépasse")).length, 1);
+  assert.equal(doublard.stats.accidents, 0, "pas d'accrochage: la cible est à l'arrêt");
+  assert.equal(cible.stats.accidents, 0);
+  assert.equal(doublard.organs.chassis, 0);
+  assert.equal(cible.organs.chassis, 0);
 });

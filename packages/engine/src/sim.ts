@@ -21,8 +21,10 @@ import {
   WEATHER_GRIP_EFFECT, WEATHER_POWER_EFFECT, DARING_BY_RISK, NIGHT_POWER_LOSS, NIGHT_AUDACITY_LOSS,
   FATIGUE_POWER_START, FATIGUE_POWER_RATE, FATIGUE_AUDACITY_RATE, CURVE_REF_RADIUS_M, CURVE_MIN_NORMALIZED,
   TOWING_SPEED_FACTOR, FUEL_DENSITY_KG_PER_L, WHEEL_DRIVE_EFF, GRAVITY,
-  DRAFT_GAP_MIN_KM, DRAFT_GAP_MAX_KM, DRAFT_SPEED_DIFF, OVERTAKE_GAP_MAX_KM, OVERTAKE_RISK_BASE,
-  DEFEND_EXTRA_RISK, OVERTAKE_COLLISION_SHARE, OVERTAKE_SPEED_GAIN, OVERTAKE_RISK_FACTOR,
+  DRAFT_GAP_MIN_KM, DRAFT_GAP_MAX_KM, DRAFT_SPEED_DIFF, OVERTAKE_GAP_MAX_KM,
+  TRACK_WIDTH_M, CAR_WIDTH_M, CAR_LEN_M, LAT_RATE_M_S, ALONGSIDE_OVERLAP_M, SIDE_CLEARANCE_M,
+  OVERTAKE_ALONGSIDE_SPEED_DELTA, SIDE_EDGE_MARGIN_M, OVERTAKE_ACC_PER_S, OVERTAKE_ACC_RISK, OVERTAKE_ACC_CURVE_MIN,
+  OVERTAKE_ACC_CURVE_GAIN, DEFEND_ACC_FACTOR, OFFLINE_SPEED_PENALTY, OVERTAKE_FAIL_COOLDOWN_S,
   DUST_GAP_KM, DUST_SPEED_FACTOR, DUST_FATIGUE_PER_TICK,
   FUEL_TIME_PER_PERCENT, WHEEL_CHANGE_HOURS, REPAIR_TIME_MIN_SHARE, REPAIR_TIME_WEAR_SHARE,
   REPAIR_PRICE_MIN_SHARE, REPAIR_PRICE_WEAR_SHARE, ORGAN_CRITICAL_WEAR, ORGAN_WARN_WEAR, DIAG_ORGAN_MENTION,
@@ -30,7 +32,7 @@ import {
   FUEL_PRICE_PER_LITRE, TIRE_PRICE, HOTEL_PRICE, REPAIR_PRICE_BASE, REPAIR_HOURS, ACCIDENT_FAULT_PENALTY,
   settingsEffects,
 } from "./calibration";
-import { segmentAt, nextStation, weatherAt, curvatureAt } from "./world";
+import { segmentAt, nextStation, weatherAt, curvatureAt, curvatureSignedAt } from "./world";
 import { Rng } from "./rng";
 import { GameVariables, tickPlanner, ActiveEffects } from "./planner";
 
@@ -500,39 +502,103 @@ function tickImmobilized(car: CarState, ctx: SimContext, emit: (t: string) => vo
   }
 }
 
-function applyTrafficEffects(
+// ========== DÉPASSEMENT SPATIAL ==========
+// Le trafic vit sur un axe (positionKm) + un déport latéral (car.lateral, m).
+// Une manœuvre traverse 3 phases: approche (déport du côté choisi), côte à
+// côte (chevauchement réel — SEUL moment où l'accrochage peut survenir),
+// décrochage (retour au centre). "X dépasse Y" n'est journalisé qu'au VRAI
+// franchissement (écart > CAR_LEN_M), une seule fois par manœuvre.
+// La Direction désigne le fautif par la GÉOMÉTRIE: en virage, l'EXTÉRIEUR
+// est en tort (l'intérieur possède la trajectoire); sur ligne droite, la
+// voiture qui fait la manœuvre — sauf si le rival défend activement.
+export function resolveContactFault(doubler: CarState, target: CarState, ctx: SimContext): CarState {
+  const curve = curvatureSignedAt(ctx.world, doubler.positionKm);
+  if (Math.abs(curve) > 0.15) {
+    // vrai virage: convention curvature > 0 = virage à GAUCHE → l'intérieur
+    // est à gauche (lateral plus grand). La voiture à l'intérieur possède la ligne.
+    const doublerInside = curve > 0 ? doubler.lateral > target.lateral : doubler.lateral < target.lateral;
+    return doublerInside ? target : doubler;
+  }
+  // ligne droite: le doublard est en tort, sauf défense active du rival
+  return target.defending ? target : doubler;
+}
+
+export function applyTrafficEffects(
   car: CarState,
   ctx: SimContext,
   speed: number,
-  riskFactor: number,
+  _riskFactor: number,
   emit: (t: string) => void
 ): number {
   let v = speed;
+  const seg = segmentAt(ctx.world.segments, car.positionKm);
+  const halfW = (TRACK_WIDTH_M as Record<string, number>)[seg.width] / 2;
+  const curve = curvatureAt(ctx.world, car.positionKm);
+  const latStep = LAT_RATE_M_S * TICK_SECONDS;
   const others = ctx.allCars.filter(
     (c) => c.playerId !== car.playerId && !c.arrived && !c.forfait && Math.abs(c.positionKm - car.positionKm) < 1.0
   );
-  for (const other of others) {
-    const gap = other.positionKm - car.positionKm;
-    if (gap > DRAFT_GAP_MIN_KM && gap < DRAFT_GAP_MAX_KM && Math.abs(other.speedKmh - car.speedKmh) < DRAFT_SPEED_DIFF) {
-      v *= 1.03;
-      mental(car, ctx.tick, "Je suis dans le sillage, ça glisse tout seul.");
-    } else if (gap > 0 && gap < OVERTAKE_GAP_MAX_KM && other.speedKmh < car.speedKmh * DUST_SPEED_FACTOR) {
-      const seg = segmentAt(ctx.world.segments, car.positionKm);
-      if (car.overtaking !== "interdit" && seg.width !== "etroite") {
-        const riskBase = (OVERTAKE_RISK_BASE as Record<string, number>)[car.overtaking] ?? 0;
-        const defended = other.defending ? DEFEND_EXTRA_RISK : 0;
-        const p = (riskBase + defended) * TICK_SECONDS * ((OVERTAKE_RISK_FACTOR as Record<string, number>)[car.risk] ?? 1);
-        if (ctx.rng.chance(p)) {
-          car.stats.depassements++;
-          emit(`${car.playerId} dépasse ${other.playerId} !`);
-          v *= OVERTAKE_SPEED_GAIN;
-        } else if (ctx.rng.chance(p * OVERTAKE_COLLISION_SHARE)) {
+
+  if (car.maneuver) {
+    const m = car.maneuver;
+    const target = others.find((o) => o.playerId === m.targetId);
+    if (car.overtaking === "interdit") {
+      // le pilote interdit les dépassements en pleine manœuvre: on rentre
+      m.phase = "decrochage";
+      car.noPassUntilTick = ctx.tick + OVERTAKE_FAIL_COOLDOWN_S * TICKS_PER_SECOND;
+    } else if (m.phase !== "decrochage" && !target) {
+      // cible perdue (arrivée, forfait): on rentre. Une cible IMMOBILISÉE
+      // reste dépassable: elle est au fossé, on se faufile à vitesse réduite.
+      m.phase = "decrochage";
+    } else if (m.phase === "approche" && target) {
+      const gapM = (target.positionKm - car.positionKm) * 1000;
+      // se déporter du côté choisi, au plus près du bord (15 cm) pour offrir
+      // une vraie place latérale — sinon le doublard se parque à mi-piste et
+      // reste bloqué.
+      const latTarget = m.side * (halfW - CAR_WIDTH_M / 2 - SIDE_EDGE_MARGIN_M);
+      car.lateral += Math.sign(latTarget - car.lateral) * Math.min(latStep, Math.abs(latTarget - car.lateral));
+      // à moins de 35 m: on ne fond plus sur le rival, on arrive à vitesse
+      // maîtrisée (le côte à côte dure plusieurs secondes, pas un cheveu)
+      if (gapM < 35) {
+        v = Math.min(v, target.speedKmh + OVERTAKE_ALONGSIDE_SPEED_DELTA);
+      }
+      if (Math.abs(gapM) < ALONGSIDE_OVERLAP_M) {
+        m.phase = "cote_a_cote";
+      } else if (gapM > m.startGapM + 20 || gapM > OVERTAKE_GAP_MAX_KM * 1000) {
+        // le rival s'échappe (ou on n'arrive pas à fermer): abandon propre
+        m.phase = "decrochage";
+        car.noPassUntilTick = ctx.tick + OVERTAKE_FAIL_COOLDOWN_S * TICKS_PER_SECOND;
+      }
+    }
+    if (m.phase === "cote_a_cote" && target) {
+      const gapM = (target.positionKm - car.positionKm) * 1000;
+      if (gapM <= 0) m.crossed = true;
+      const latSep = Math.abs(car.lateral - target.lateral);
+      if (latSep < CAR_WIDTH_M + SIDE_CLEARANCE_M && !target.immobilized) {
+        // pas encore la place latérale: on se tient PRÊT, derrière
+        v = Math.min(v, target.speedKmh);
+        // bloqué trop longtemps sans place: abandon propre
+        if (ctx.tick - m.startTick > 30 * TICKS_PER_SECOND) {
+          m.phase = "decrochage";
+          car.noPassUntilTick = ctx.tick + OVERTAKE_FAIL_COOLDOWN_S * TICKS_PER_SECOND;
+        }
+      } else {
+        // place réelle à côté: l'écart de vitesse se resserre (on ne "vole"
+        // pas à côté) et le bord de piste est sale
+        v = Math.min(v, target.speedKmh + OVERTAKE_ALONGSIDE_SPEED_DELTA) * 0.97;
+        const curveFactor = OVERTAKE_ACC_CURVE_MIN + OVERTAKE_ACC_CURVE_GAIN * curve * curve;
+        const perS =
+          ((OVERTAKE_ACC_PER_S as Record<string, number>)[car.overtaking] ?? 0) *
+          ((OVERTAKE_ACC_RISK as Record<string, number>)[car.risk] ?? 1) *
+          curveFactor *
+          (target.defending ? DEFEND_ACC_FACTOR : 1);
+        if (target.speedKmh > 10 && ctx.rng.chance(perS * TICK_SECONDS)) {
+          // ACCROCHAGE — seulement ici, côte à côte, jamais à distance
           car.stats.accidents++;
-          other.stats.accidents++;
+          target.stats.accidents++;
           car.organs.chassis = Math.min(100, car.organs.chassis + 20);
-          other.organs.chassis = Math.min(100, other.organs.chassis + 15);
-          const atFault = car.overtaking === "agressif" || car.risk === "haut";
-          const faultCar = atFault ? car : other;
+          target.organs.chassis = Math.min(100, target.organs.chassis + 15);
+          const faultCar = resolveContactFault(car, target, ctx);
           faultCar.budget -= ACCIDENT_FAULT_PENALTY;
           faultCar.stats.depenses += ACCIDENT_FAULT_PENALTY;
           faultCar.transactions.push({
@@ -541,17 +607,93 @@ function applyTrafficEffects(
             amount: -ACCIDENT_FAULT_PENALTY,
           });
           emit(
-            `Accrochage entre ${car.playerId} et ${other.playerId} ! Direction de course : ${faultCar.playerId} en tort (-${ACCIDENT_FAULT_PENALTY}).`
+            `Accrochage entre ${car.playerId} et ${target.playerId} ! Direction de course : ${faultCar.playerId} en tort (-${ACCIDENT_FAULT_PENALTY}).`
           );
           mental(car, ctx.tick, "Ça a frotté… la Direction ne va pas aimer.");
-        } else if (gap < DUST_GAP_KM) {
-          v *= DUST_SPEED_FACTOR;
-          car.fatigue = Math.min(100, car.fatigue + DUST_FATIGUE_PER_TICK);
-          mental(car, ctx.tick, "La poussière de celui de devant, je ne vois rien.");
+          m.phase = "decrochage";
+          car.noPassUntilTick = ctx.tick + OVERTAKE_FAIL_COOLDOWN_S * TICKS_PER_SECOND;
+          target.noPassUntilTick = ctx.tick + (OVERTAKE_FAIL_COOLDOWN_S / 2) * TICKS_PER_SECOND;
+        } else if (m.crossed && gapM <= -CAR_LEN_M) {
+          // VRAI FRANCHISSEMENT: l'écart a changé de signe et dépasse une longueur
+          car.stats.depassements++;
+          emit(`${car.playerId} dépasse ${target.playerId} !`);
+          m.phase = "decrochage";
+        } else if (gapM < -2 * ALONGSIDE_OVERLAP_M) {
+          // le rival a repris l'avantage: abandon propre
+          m.phase = "decrochage";
+          car.noPassUntilTick = ctx.tick + OVERTAKE_FAIL_COOLDOWN_S * TICKS_PER_SECOND;
         }
-      } else if (seg.width === "etroite") {
-        v = Math.min(v, other.speedKmh);
       }
+    }
+    if (m.phase === "decrochage") {
+      car.lateral -= Math.sign(car.lateral) * Math.min(latStep, Math.abs(car.lateral));
+      if (Math.abs(car.lateral) < 0.05) {
+        car.lateral = 0;
+        car.maneuver = null;
+      }
+    }
+    // hors trajectoire en virage: le bord de piste est sale (cailloux, souches)
+    if (Math.abs(car.lateral) > halfW * 0.4 && curve > 0.05) v *= OFFLINE_SPEED_PENALTY;
+  } else {
+    // pas de manœuvre: retour progressif à la trajectoire idéale (centre)
+    car.lateral -= Math.sign(car.lateral) * Math.min(latStep * 0.6, Math.abs(car.lateral));
+    if (Math.abs(car.lateral) < 0.05) car.lateral = 0;
+
+    // initiation d'une manœuvre? Il faut: l'autorisation du pilote, la place
+    // RÉELLE sur la piste (2 voitures + marges latérales), pas de cooldown,
+    // et le rival le plus proche devant, plus lent, pas déjà doublé par
+    // quelqu'un d'autre (file d'attente naturelle).
+    if (car.overtaking !== "interdit" && ctx.tick >= car.noPassUntilTick) {
+      const roomOk = 2 * CAR_WIDTH_M + 2 * SIDE_CLEARANCE_M <= 2 * halfW;
+      const blockedIds = new Set(others.filter((o) => o.maneuver).map((o) => o.maneuver!.targetId));
+      const candidates = others.filter(
+        (o) =>
+          o.positionKm - car.positionKm > 0 &&
+          o.positionKm - car.positionKm < OVERTAKE_GAP_MAX_KM &&
+          o.speedKmh < car.speedKmh * DUST_SPEED_FACTOR &&
+          !blockedIds.has(o.playerId)
+      );
+      if (candidates.length > 0) {
+        const candidate = candidates.reduce((best, o) =>
+          o.positionKm - car.positionKm < best.positionKm - car.positionKm ? o : best
+        );
+        // une voiture AU FOSSÉ (immobilisée) se contourne même sans place
+        // latérale "normale": elle n'est pas sur la trajectoire de course
+        if (roomOk || candidate.immobilized) {
+          // côté: à l'opposé du déport actuel du rival; s'il est au centre, à droite
+          const side: -1 | 1 = candidate.lateral > 0.2 ? -1 : candidate.lateral < -0.2 ? 1 : -1;
+          car.maneuver = {
+            targetId: candidate.playerId,
+            phase: "approche",
+            side,
+            startTick: ctx.tick,
+            startGapM: (candidate.positionKm - car.positionKm) * 1000,
+            crossed: false,
+          };
+        }
+      }
+    }
+  }
+
+  // --- effets de proximité: aspiration, poussière, file sur piste étroite ---
+  for (const other of others) {
+    const gap = other.positionKm - car.positionKm;
+    if (gap > DRAFT_GAP_MIN_KM && gap < DRAFT_GAP_MAX_KM && Math.abs(other.speedKmh - car.speedKmh) < DRAFT_SPEED_DIFF) {
+      v *= 1.03;
+      mental(car, ctx.tick, "Je suis dans le sillage, ça glisse tout seul.");
+    } else if (gap > 0 && gap < DUST_GAP_KM && Math.abs(car.lateral - other.lateral) < CAR_WIDTH_M) {
+      // POUSSIÈRE — seulement dans le sillage LATÉRAL du rival: se déporter,
+      // c'est en sortir (le cœur du dépassement spatial)
+      v *= DUST_SPEED_FACTOR;
+      // SANS manœuvre, traverser un rival est PHYSIQUEMENT impossible:
+      // on suit. Seule une manœuvre latérale réelle permet de dépasser.
+      if (!car.maneuver && !other.immobilized) v = Math.min(v, other.speedKmh);
+      car.fatigue = Math.min(100, car.fatigue + DUST_FATIGUE_PER_TICK);
+      mental(car, ctx.tick, "La poussière de celui de devant, je ne vois rien.");
+    } else if (gap > 0 && gap < 0.03 && seg.width === "etroite" && !other.immobilized) {
+      // piste étroite: aucune place pour se mettre à deux — on suit
+      // (une voiture au fossé ne bloque pas: on se faufile)
+      v = Math.min(v, other.speedKmh);
     }
   }
   return v;

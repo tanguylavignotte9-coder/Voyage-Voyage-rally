@@ -176,6 +176,16 @@ export interface CarStats {
   depassements: number;
 }
 
+// Manœuvre de dépassement spatiale: phases réelles, franchissement réel.
+export interface OvertakeManeuver {
+  targetId: string;
+  phase: "approche" | "cote_a_cote" | "decrochage";
+  side: -1 | 1;             // côté de passage: +1 = gauche, -1 = droite
+  startTick: number;
+  startGapM: number;        // écart longitudinal au moment de l'initiation (m)
+  crossed: boolean;         // l'écart a changé de signe (on est allé au contact)
+}
+
 export interface CarState {
   playerId: string;
   color: CarColor;
@@ -210,6 +220,9 @@ export interface CarState {
   overtaking: "agressif" | "prudent" | "interdit";
   defending: boolean;
   offsetSeconds: number;
+  lateral: number;                   // déport latéral signé en m (+ = gauche de l'axe, - = droite)
+  maneuver: OvertakeManeuver | null; // manœuvre de dépassement en cours
+  noPassUntilTick: number;          // cooldown avant nouvelle tentative (échec/accrochage)
   gear: number;   // rapport engagé (1..6)
   rpm: number;    // régime moteur (tr/min)
   throttle: number; // 0..1 accélérateur

@@ -284,15 +284,31 @@ export const GRAVITY = 9.81;
 // ========== INTERACTIONS TRAFIC ==========
 export const DRAFT_GAP_MIN_KM = 0.02, DRAFT_GAP_MAX_KM = 0.3;   // aspiration
 export const DRAFT_SPEED_DIFF = 8;                                // km/h de tolérance
-export const OVERTAKE_GAP_MAX_KM = 0.15;                          // fenêtre de dépassement
-export const OVERTAKE_RISK_BASE = { agressif: 0.15, prudent: 0.05, interdit: 0 };
-export const DEFEND_EXTRA_RISK = 0.3;
-export const OVERTAKE_COLLISION_SHARE = 0.4;   // part de risque de l'accrochage
-export const OVERTAKE_SPEED_GAIN = 1.05;       // gain de vitesse au dépassement
-export const OVERTAKE_RISK_FACTOR = { haut: 2, normal: 1, bas: 0.3 };
 export const DUST_GAP_KM = 0.05;               // dans la poussière: malus
 export const DUST_SPEED_FACTOR = 0.9;
 export const DUST_FATIGUE_PER_TICK = 0.01;
+
+// ========== DÉPASSEMENT SPATIAL ==========
+// Les voitures vivent sur un axe (positionKm) + un déport latéral (lateral, m).
+// Le dépassement est une manœuvre réelle en 3 phases (approche → côte à côte →
+// décrochage) qui se termine par un VRAI franchissement de position. L'accrochage
+// ne se tire QU'en côte à côte (chevauchement réel) — plus jamais à distance.
+export const OVERTAKE_GAP_MAX_KM = 0.15;        // fenêtre d'engagement (init de manœuvre)
+export const TRACK_WIDTH_M = { large: 12, moyenne: 7.5, etroite: 4.5 }; // largeur de piste par segment
+export const CAR_WIDTH_M = 1.9;                 // largeur d'une voiture
+export const CAR_LEN_M = 4.3;                   // longueur — franchissement = écart > CAR_LEN
+export const LAT_RATE_M_S = 3.2;                // vitesse de déport latéral (m/s)
+export const ALONGSIDE_OVERLAP_M = 8;          // |écart| < 8 m => chevauchement (côte à côte)
+export const SIDE_CLEARANCE_M = 0.5;           // marge latérale minimale côte à côte
+export const SIDE_EDGE_MARGIN_M = 0.15;        // distance au bord de piste lors d'un dépassement
+export const OVERTAKE_ALONGSIDE_SPEED_DELTA = 15; // écart de vitesse max en côte à côte (km/h)
+export const OVERTAKE_ACC_PER_S = { agressif: 0.12, prudent: 0.012, interdit: 0 }; // accrochage/s en côte à côte
+export const OVERTAKE_ACC_RISK = { haut: 2.2, normal: 1, bas: 0.35 };
+export const OVERTAKE_ACC_CURVE_MIN = 0.4;      // risque plancher, même en ligne droite
+export const OVERTAKE_ACC_CURVE_GAIN = 2.1;     // le virage multiplie le risque (max ×2,5 à R=90 m)
+export const DEFEND_ACC_FACTOR = 1.8;           // défenseur qui tique: risque accru
+export const OFFLINE_SPEED_PENALTY = 0.94;      // rouler au bord de la piste en virage
+export const OVERTAKE_FAIL_COOLDOWN_S = 8;     // délai avant nouvelle tentative après échec
 
 // ========== STATION / RÉPARATION ==========
 export const FUEL_TIME_PER_PERCENT = 0.25 / 100;  // heures de plein par % de réservoir
