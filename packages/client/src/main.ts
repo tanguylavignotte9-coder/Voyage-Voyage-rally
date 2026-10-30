@@ -116,12 +116,12 @@ function connect(): void {
       state = msg;
       const myNew = state.cars.find((c) => c.playerId === myId);
       if (myNew) {
-        // anti-saccade: le serveur émet un état ~toutes les 500 ms mais la
-        // position n'avance qu'une fois par tick (1 s). On ne re-ancre
-        // l'extrapolation QUE sur un état qui a fait progresser la voiture —
-        // ré-ancrer sur un doublon ramène le rendu en arrière ("rollback").
+        // anti-saccade: le serveur émet un état toutes les ~100 ms et la
+        // position avance à chaque tick — on re-ancre à CHAQUE état reçu.
+        // (Un état où la position n'avance pas = voiture arrêtée: on garde
+        // l'ancienne ancre, le lissage ci-dessous ramène la vitesse à 0.)
         lastKnownSpeed = myNew.speedKmh;
-        if (lastStateTime === 0 || myNew.positionKm > lastKnownKm) {
+        if (lastStateTime === 0 || myNew.positionKm >= lastKnownKm) {
           lastKnownKm = myNew.positionKm;
           lastStateTime = performance.now();
         }
@@ -935,6 +935,7 @@ let lastStateTime = 0;
 let extrapolatedKm = 0;
 let lastKnownKm = 0;
 let lastKnownSpeed = 0;
+let renderSpeed = 0; // vitesse de rendu lissée (km/h), suit lastKnownSpeed en douceur
 const pathChunks = new Map<number, any[]>();
 let lastFrame = 0;
 let dustParticles: { x: number; y: number; vx: number; vy: number; life: number }[] = [];
@@ -1423,19 +1424,21 @@ function render(): void {
   const h = (cv.height = cv.clientHeight);
   const car = myCar();
   const myPub = state.cars.find((c) => c.playerId === myId);
-  // extrapolation 60 fps + LISSAGE: la cible avance depuis la dernière ancre
-  // ayant réellement progressé; le point de rendu poursuit sa cible (constante
-  // ~100 ms) pour absorber les à-coups de vitesse, et se téléporte au-delà de
-  // 100 m (arrêt en station, remorquage) au lieu de filmer un rattrapage.
+  // extrapolation 60 fps + DOUBLE LISSAGE: la vitesse de rendu suit la vitesse
+  // serveur en ~200 ms (absorbe les virages) et le point de rendu poursuit la
+  // cible en ~100 ms; téléport au-delà de 100 m (arrêt station, remorquage).
   {
     const dtS = (performance.now() - lastStateTime) / 1000;
-    const targetKm = lastKnownSpeed > 0
-      ? lastKnownKm + (lastKnownSpeed * dtS) / 3600
+    const vTarget = lastKnownSpeed;
+    renderSpeed += (vTarget - renderSpeed) * Math.min(1, dt * 5);
+    if (renderSpeed < 0.5 && vTarget < 0.5) renderSpeed = 0;
+    const targetKm = renderSpeed > 0
+      ? lastKnownKm + (renderSpeed * dtS) / 3600
       : (myPub?.positionKm ?? lastKnownKm);
     if (extrapolatedKm === 0 || Math.abs(targetKm - extrapolatedKm) > 0.1) extrapolatedKm = targetKm;
     else extrapolatedKm += (targetKm - extrapolatedKm) * Math.min(1, dt * 10);
   }
-  const km = myPub ? (lastKnownSpeed > 0 ? extrapolatedKm : myPub.positionKm) : 0;
+  const km = myPub ? (renderSpeed > 0 || extrapolatedKm > 0 ? extrapolatedKm : myPub.positionKm) : 0;
   const seg = state.world.segments[Math.min(state.world.segments.length - 1, Math.floor(km / 25))];
   const weather = myPub?.weather ?? "clair";
   const hour = hourOfDay(state.tick);

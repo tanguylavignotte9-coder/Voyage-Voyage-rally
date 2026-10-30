@@ -355,7 +355,10 @@ let lastBroadcast = 0;
 setInterval(() => {
   host.race.step();
   const now = Date.now();
-  if (now - lastBroadcast >= 500) {
+  // diffusion fréquente (100 ms): la position serveur avance à chaque tick
+  // (30/s), un état toutes les 500 ms rendait l'extrapolation client périmée
+  // et provoquait des saccades à chaque ré-ancrage.
+  if (now - lastBroadcast >= 100) {
     lastBroadcast = now;
     broadcastState();
   }
