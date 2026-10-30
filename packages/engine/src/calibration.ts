@@ -309,6 +309,8 @@ export const OVERTAKE_ACC_CURVE_GAIN = 2.1;     // le virage multiplie le risque
 export const DEFEND_ACC_FACTOR = 1.8;           // défenseur qui tique: risque accru
 export const OFFLINE_SPEED_PENALTY = 0.94;      // rouler au bord de la piste en virage
 export const OVERTAKE_FAIL_COOLDOWN_S = 8;     // délai avant nouvelle tentative après échec
+export const OVERTAKE_LOOKAHEAD_KM = 0.6;      // conscience: fenêtre de lecture du tracé avant engagement
+export const OVERTAKE_WINDOW_CURVE_MAX = 0.15; // courbure max dans la fenêtre (0,15 = vrai virage)
 
 // ========== STATION / RÉPARATION ==========
 export const FUEL_TIME_PER_PERCENT = 0.25 / 100;  // heures de plein par % de réservoir

@@ -635,6 +635,25 @@ export function curvatureSignedAt(world: World, km: number, window = 0.12): numb
   return Math.max(-1, Math.min(1, (sum / n) / (1 / 90)));
 }
 
+// Lit le tracé DEVANT (fenêtre d'engagement): largeur la plus contraignante
+// et courbure la plus forte sur les kmAhead prochains. La conscience de
+// course du doublard: ne s'engager que si le dépassement peut s'y TERMINER.
+export function roadAhead(world: World, km: number, kmAhead: number): { minWidth: TrackWidth; maxCurve: number } {
+  const rank: Record<TrackWidth, number> = { large: 0, moyenne: 1, etroite: 2 };
+  const i0 = Math.min(world.segments.length - 1, Math.max(0, Math.floor(km / 5)));
+  const i1 = Math.min(world.segments.length - 1, Math.max(0, Math.floor((km + kmAhead) / 5)));
+  let minWidth: TrackWidth = "large";
+  for (let i = i0; i <= i1; i++) {
+    if (rank[world.segments[i].width] > rank[minWidth]) minWidth = world.segments[i].width;
+  }
+  let maxCurve = 0;
+  for (let k = km; k <= km + kmAhead; k += 0.05) {
+    const c = curvatureAt(world, k);
+    if (c > maxCurve) maxCurve = c;
+  }
+  return { minWidth, maxCurve };
+}
+
 export function segmentAt(segments: TerrainSegment[], km: number): TerrainSegment {
   const segKm = 5;
   const idx = Math.min(segments.length - 1, Math.max(0, Math.floor(km / segKm)));

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { generateWorld } from "./world";
+import { generateWorld, roadAhead } from "./world";
 import { Rng, seedFromString } from "./rng";
 import { Race, PRIME_HOUR } from "./race";
 import { darknessFactor, computeSpeed, applyTrafficEffects, resolveContactFault, SimContext, TICK_SECONDS } from "./sim";
@@ -283,4 +283,65 @@ test("accrochage: impossible contre une voiture à l'arrêt (bas-côté)", () =>
   assert.equal(cible.stats.accidents, 0);
   assert.equal(doublard.organs.chassis, 0);
   assert.equal(cible.organs.chassis, 0);
+});
+
+// ========== CONSCIENCE DE COURSE (fenêtre d'engagement) ==========
+
+test("conscience: lecture du tracé devant (roadAhead)", () => {
+  const fakeWorld = {
+    segments: [
+      { km: 0, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "large" },
+      { km: 5, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "large" },
+      { km: 10, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "etroite" },
+      { km: 15, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "etroite" },
+      { km: 20, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "etroite" },
+    ],
+    points: Array.from({ length: 1500 }, () => ({ curvature: 0 })),
+  } as any;
+  assert.equal(roadAhead(fakeWorld, 0.5, 0.6).minWidth, "large", "fenêtre dans le large");
+  assert.equal(roadAhead(fakeWorld, 9.4, 0.6).minWidth, "etroite", "fenêtre qui touche l'étroit");
+  assert.ok(roadAhead(fakeWorld, 0.5, 0.6).maxCurve <= 0.15, "fenêtre plate");
+});
+
+test("conscience: on attend la fenêtre ouverte pour s'engager", () => {
+  const mkFakeWorld = () => ({
+    segments: [
+      { km: 0, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "large" },
+      { km: 5, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "large" },
+      { km: 10, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "etroite" },
+      { km: 15, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "etroite" },
+      { km: 20, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "etroite" },
+    ],
+    points: Array.from({ length: 1500 }, () => ({ curvature: 0 })),
+  }) as any;
+  const drive = (km0: number, ticks: number) => {
+    const doublard = mkCar("attaque");
+    doublard.playerId = "rapide"; doublard.positionKm = km0; doublard.speedKmh = 100;
+    doublard.overtaking = "prudent"; doublard.risk = "bas";
+    const cible = mkCar("prudente");
+    cible.playerId = "lente"; cible.positionKm = km0 + 0.06; cible.speedKmh = 70;
+    const ctx: SimContext = {
+      world: mkFakeWorld(), fronts: [], rng: new Rng(seedFromString("fenetre")), tick: 0, raceStartTick: 0,
+      started: true, hourOfDay: () => 10, allCars: [doublard, cible],
+      logGlobal: () => {},
+    };
+    for (let t = 0; t < ticks && (doublard.stats.depassements === 0 || doublard.maneuver !== null); t++) {
+      ctx.tick = t;
+      const vd = applyTrafficEffects(doublard, ctx, 100, 1, () => {});
+      doublard.speedKmh = vd;
+      doublard.positionKm += (vd / 3600) * TICK_SECONDS;
+      const vc = applyTrafficEffects(cible, ctx, 70, 1, () => {});
+      cible.speedKmh = vc;
+      cible.positionKm += (vc / 3600) * TICK_SECONDS;
+    }
+    return doublard;
+  };
+  // fenêtre fermée (un étroit arrive dans les 600 m): aucune manœuvre, on suit
+  const attendant = drive(9.4, 300);
+  assert.equal(attendant.maneuver, null, "fenêtre fermée: pas d'engagement");
+  assert.equal(attendant.stats.depassements, 0, "fenêtre fermée: pas de dépassement");
+  // fenêtre ouverte: la même situation (écart 60 m, cible plus lente) se débloque
+  const passant = drive(0.5, 2700);
+  assert.equal(passant.stats.depassements, 1, "fenêtre ouverte: le dépassement se fait");
+  assert.equal(passant.maneuver, null, "manœuvre terminée");
 });

@@ -25,6 +25,7 @@ import {
   TRACK_WIDTH_M, CAR_WIDTH_M, CAR_LEN_M, LAT_RATE_M_S, ALONGSIDE_OVERLAP_M, SIDE_CLEARANCE_M,
   OVERTAKE_ALONGSIDE_SPEED_DELTA, SIDE_EDGE_MARGIN_M, OVERTAKE_ACC_PER_S, OVERTAKE_ACC_RISK, OVERTAKE_ACC_CURVE_MIN,
   OVERTAKE_ACC_CURVE_GAIN, DEFEND_ACC_FACTOR, OFFLINE_SPEED_PENALTY, OVERTAKE_FAIL_COOLDOWN_S,
+  OVERTAKE_LOOKAHEAD_KM, OVERTAKE_WINDOW_CURVE_MAX,
   DUST_GAP_KM, DUST_SPEED_FACTOR, DUST_FATIGUE_PER_TICK,
   FUEL_TIME_PER_PERCENT, WHEEL_CHANGE_HOURS, REPAIR_TIME_MIN_SHARE, REPAIR_TIME_WEAR_SHARE,
   REPAIR_PRICE_MIN_SHARE, REPAIR_PRICE_WEAR_SHARE, ORGAN_CRITICAL_WEAR, ORGAN_WARN_WEAR, DIAG_ORGAN_MENTION,
@@ -32,7 +33,7 @@ import {
   FUEL_PRICE_PER_LITRE, TIRE_PRICE, HOTEL_PRICE, REPAIR_PRICE_BASE, REPAIR_HOURS, ACCIDENT_FAULT_PENALTY,
   settingsEffects,
 } from "./calibration";
-import { segmentAt, nextStation, weatherAt, curvatureAt, curvatureSignedAt } from "./world";
+import { segmentAt, nextStation, weatherAt, curvatureAt, curvatureSignedAt, roadAhead } from "./world";
 import { Rng } from "./rng";
 import { GameVariables, tickPlanner, ActiveEffects } from "./planner";
 
@@ -658,8 +659,18 @@ export function applyTrafficEffects(
           o.positionKm - car.positionKm < best.positionKm - car.positionKm ? o : best
         );
         // une voiture AU FOSSÉ (immobilisée) se contourne même sans place
-        // latérale "normale": elle n'est pas sur la trajectoire de course
-        if (roomOk || candidate.immobilized) {
+        // latérale "normale": elle n'est pas sur la trajectoire de course.
+        // CONSCIENCE DE COURSE: on ne s'engage que si la fenêtre DEVANT
+        // permet de TERMINER le dépassement (pas de segment étroit, pas de
+        // virage trop fort). Sinon on attend dans le sillage — le moment
+        // opportun existe, il suffit de le lire sur le tracé.
+        const fenetre = candidate.immobilized
+          ? null
+          : roadAhead(ctx.world, car.positionKm, OVERTAKE_LOOKAHEAD_KM);
+        const fenetreOk =
+          fenetre === null ||
+          (fenetre.minWidth !== "etroite" && fenetre.maxCurve <= OVERTAKE_WINDOW_CURVE_MAX);
+        if ((roomOk && fenetreOk) || candidate.immobilized) {
           // côté: à l'opposé du déport actuel du rival; s'il est au centre, à droite
           const side: -1 | 1 = candidate.lateral > 0.2 ? -1 : candidate.lateral < -0.2 ? 1 : -1;
           car.maneuver = {
