@@ -223,6 +223,7 @@ export interface CarState {
   lateral: number;                   // déport latéral signé en m (+ = gauche de l'axe, - = droite)
   maneuver: OvertakeManeuver | null; // manœuvre de dépassement en cours
   noPassUntilTick: number;          // cooldown avant nouvelle tentative (échec/accrochage)
+  dustTick: number;                 // dernier tick passé dans la poussière d'un rival
   gear: number;   // rapport engagé (1..6)
   rpm: number;    // régime moteur (tr/min)
   throttle: number; // 0..1 accélérateur

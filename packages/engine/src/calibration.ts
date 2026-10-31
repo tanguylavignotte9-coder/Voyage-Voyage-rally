@@ -286,7 +286,14 @@ export const DRAFT_GAP_MIN_KM = 0.02, DRAFT_GAP_MAX_KM = 0.3;   // aspiration
 export const DRAFT_SPEED_DIFF = 8;                                // km/h de tolérance
 export const DUST_GAP_KM = 0.05;               // dans la poussière: malus
 export const DUST_SPEED_FACTOR = 0.9;
-export const DUST_FATIGUE_PER_TICK = 0.01;
+// POUSSIÈRE & FATIGUE: l'ancien DUST_FATIGUE_PER_TICK = 0,01 PAR TICK était
+// calibré comme si 1 tick = 1 s — à 30 ticks/s il valait +1080 points/h
+// (120× l'attaque!), et la boucle poussière->sommeil->poussière gelait les
+// voitures prudentes 11 h sur 12 (mesuré: 33 km en 12 h). La poussière est
+// désormais un MULTIPLICATEUR de la fatigue du moment, dans la famille des
+// facteurs nuit (x1,7) et météo (x1,3). Hypothèse x1,5, effet mesuré sur la
+// course de référence sahara-2026-vvr (bench 12 h post-patch).
+export const DUST_FATIGUE_FACTOR = 1.5;
 
 // ========== DÉPASSEMENT SPATIAL ==========
 // Les voitures vivent sur un axe (positionKm) + un déport latéral (lateral, m).
@@ -333,7 +340,10 @@ export const FATIGUE_DANGER = 85;                 // pensées: danger
 export const AERO_HALF = 0.5;                    // ½·ρ·Cx·S (le 0.5 de la formule de traînée)
 export const CONVERGENCE_DAMPING = 0.5;         // amorti de l'itération d'équilibre vitesse
 export const CONVERGENCE_EPS = 0.05;            // seuil de convergence (m/s)
-export const FUEL_TIME_H_PER_L = 0.0042;        // heures de plein par litre (≈15 min les 400 L)
+export const FUEL_TIME_H_PER_L = 0.000625;      // heures de plein par litre (≈15 min les 400 L)
+// (0,25 h / 400 L — conforme au commentaire ci-dessus et à FUEL_TIME_PER_PERCENT.
+// L'ancienne valeur 0,0042 h/L donnait 1 h 40 de plein: mesuré au banc, regulier
+// passait 1,5 h à la station pour un simple ravitaillement.)
 
 // répartition des charges par organe (parts de statWheel/shock/traction)
 export const LOAD_SHOCK_GAIN = 0.00025;        // chocs: mass·v²·Cr·gain

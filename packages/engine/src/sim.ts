@@ -26,7 +26,7 @@ import {
   OVERTAKE_ALONGSIDE_SPEED_DELTA, SIDE_EDGE_MARGIN_M, OVERTAKE_ACC_PER_S, OVERTAKE_ACC_RISK, OVERTAKE_ACC_CURVE_MIN,
   OVERTAKE_ACC_CURVE_GAIN, DEFEND_ACC_FACTOR, OFFLINE_SPEED_PENALTY, OVERTAKE_FAIL_COOLDOWN_S,
   OVERTAKE_LOOKAHEAD_KM, OVERTAKE_WINDOW_CURVE_MAX,
-  DUST_GAP_KM, DUST_SPEED_FACTOR, DUST_FATIGUE_PER_TICK,
+  DUST_GAP_KM, DUST_SPEED_FACTOR, DUST_FATIGUE_FACTOR,
   FUEL_TIME_PER_PERCENT, WHEEL_CHANGE_HOURS, REPAIR_TIME_MIN_SHARE, REPAIR_TIME_WEAR_SHARE,
   REPAIR_PRICE_MIN_SHARE, REPAIR_PRICE_WEAR_SHARE, ORGAN_CRITICAL_WEAR, ORGAN_WARN_WEAR, DIAG_ORGAN_MENTION,
   MENTAL_LOG_MAX, STATION_PROXIMITY_KM, FATIGUE_HEAVY_EYES, FATIGUE_DANGER,
@@ -345,7 +345,8 @@ function tickCarInternal(car: CarState, ctx: SimContext, emit: (t: string) => vo
   const fatigueRate =
     FATIGUE_PER_HOUR[car.pace] *
     (1 + darkness * (FATIGUE_NIGHT_FACTOR - 1)) *
-    (weather !== "clair" ? FATIGUE_WEATHER_FACTOR : 1);
+    (weather !== "clair" ? FATIGUE_WEATHER_FACTOR : 1) *
+    (car.dustTick === ctx.tick ? DUST_FATIGUE_FACTOR : 1);
   wearUpdate(car, seg, weather, riskFactor, distanceDelta, ctx, emit);
   car.fatigue = Math.min(100, car.fatigue + fatigueRate * (TICK_SECONDS / 3600));
 
@@ -718,7 +719,10 @@ export function applyTrafficEffects(
       // SANS manœuvre, traverser un rival est PHYSIQUEMENT impossible:
       // on suit. Seule une manœuvre latérale réelle permet de dépasser.
       if (!car.maneuver && !other.immobilized) v = Math.min(v, other.speedKmh);
-      car.fatigue = Math.min(100, car.fatigue + DUST_FATIGUE_PER_TICK);
+      // marquer le tick de poussière: la fatigue du tick sera multipliée par
+      // DUST_FATIGUE_FACTOR (l'ancien ajout forfaitaire confondait ticks et
+      // secondes: 0,01/tick = +1080/h à 30 ticks/s)
+      car.dustTick = ctx.tick;
       mental(car, ctx.tick, "La poussière de celui de devant, je ne vois rien.");
     } else if (gap > 0 && gap < 0.03 && seg.width === "etroite" && !other.immobilized) {
       // piste étroite: aucune place pour se mettre à deux — on suit

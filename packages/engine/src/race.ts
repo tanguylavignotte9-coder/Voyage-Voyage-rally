@@ -1,4 +1,4 @@
-import { DEFAULT_RULES, CarState, World, WeatherFront, PlayerRule, TICKS_PER_HOUR, FUEL_CAPACITY_L, BUDGET_START } from "./types";
+import { DEFAULT_RULES, CarState, World, WeatherFront, PlayerRule, TICKS_PER_HOUR, TICKS_PER_SECOND, FUEL_CAPACITY_L, BUDGET_START } from "./types";
 import { DAILY_PRIME_BASE, DAILY_PRIME_RANK_BONUS, CHALLENGE_PRIME } from "./calibration";
 import { generateWorld, generateWeatherFronts } from "./world";
 import { Rng, seedFromString } from "./rng";
@@ -103,6 +103,7 @@ export class Race {
       lateral: 0,
       maneuver: null,
       noPassUntilTick: 0,
+      dustTick: 0,
       gear: 1,
       rpm: 900,
       throttle: 0,
@@ -155,7 +156,11 @@ export class Race {
     this.tick++;
     const ctx = this.ctxFor();
     for (const car of this.cars) {
-      if (this.tick - this.raceStartTick < car.offsetSeconds) continue;
+      // offsetSeconds est en SECONDES réelles: à 30 ticks/s, 60 s demandées
+      // valent 1800 ticks — l'ancienne comparaison directe ticks vs secondes
+      // faisait partir le peloton en 2 s au lieu de l'échelonnement voulu
+      // (mesuré: 10 voitures parties en 18 s avec startIntervalSeconds 60).
+      if ((this.tick - this.raceStartTick) / TICKS_PER_SECOND < car.offsetSeconds) continue;
       tickCar(car, ctx);
     }
     this.tickDaily();
@@ -328,8 +333,9 @@ export class Race {
 
   standings(): CarState[] {
     return [...this.cars].sort((a, b) => {
-      const aT = a.arrived ? (a.arrivalTime ?? 0) - a.offsetSeconds : Infinity;
-      const bT = b.arrived ? (b.arrivalTime ?? 0) - b.offsetSeconds : Infinity;
+      // compensation du handicap de départ en TICKS (offsetSeconds est en s)
+      const aT = a.arrived ? (a.arrivalTime ?? 0) - a.offsetSeconds * TICKS_PER_SECOND : Infinity;
+      const bT = b.arrived ? (b.arrivalTime ?? 0) - b.offsetSeconds * TICKS_PER_SECOND : Infinity;
       if (a.arrived && b.arrived) return aT - bT;
       if (a.arrived) return -1;
       if (b.arrived) return 1;

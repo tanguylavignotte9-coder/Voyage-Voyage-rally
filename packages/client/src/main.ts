@@ -144,8 +144,14 @@ function myCar(): MyCar | null {
   return state?.mine ?? null;
 }
 
+// le serveur tourne à 30 ticks/s (TICKS_PER_HOUR = 108000): l'ancienne
+// conversion (1 tick = 1 s) faisait défiler l'horloge 30× trop vite — après
+// 6 h de course réelles l'écran affichait 20:00 alors qu'il était 14:00, et
+// la nuit visuelle tombait en plein après-midi moteur.
+const TICKS_PER_HOUR = 108000;
+
 function hourOfDay(tick: number): number {
-  return (8 + tick / 3600) % 24;
+  return (8 + tick / TICKS_PER_HOUR) % 24;
 }
 
 function fmtHour(tick: number): string {
@@ -157,7 +163,7 @@ function updateUI(): void {
   if (!state) return;
   const car = myCar();
   $("clock").textContent = fmtHour(state.tick);
-  $("day").textContent = `Jour ${Math.floor(state.tick / 86400) + 1}`;
+  $("day").textContent = `Jour ${Math.floor(state.tick / (TICKS_PER_HOUR * 24)) + 1}`;
   $("pos").textContent = `${(car?.positionKm ?? 0).toFixed(0)} km / ${state.world.totalKm} km`;
   $("budget").textContent = `💰 ${(car?.budget ?? 0).toFixed(0)}`;
 
@@ -746,7 +752,7 @@ function openResults(): void {
     const p = state!.players.find((x) => x.id === pid);
     const c = state!.cars.find((x) => x.playerId === pid);
     if (!c) return;
-    const avg = state!.tick > 0 ? c.positionKm / (state!.tick / 3600) : 0;
+    const avg = state!.tick > 0 ? c.positionKm / (state!.tick / TICKS_PER_HOUR) : 0;
     const st = c.stats;
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${i + 1}</td><td>${escapeHtml(p?.pseudo ?? pid)}${c.arrived ? " 🏁" : c.forfait ? " ❌" : ""}</td><td>${c.positionKm.toFixed(0)} km</td><td>${avg.toFixed(1)} km/h</td><td>${st ? st.pannes : "—"}</td><td>${st ? st.accidents : "—"}</td><td>${st ? st.depassements : "—"}</td><td>${st ? st.depenses.toFixed(0) : "—"}</td><td>${st ? st.primes.toFixed(0) : "—"}</td>`;
@@ -1471,7 +1477,9 @@ function render(): void {
   if (myPub && state?.fronts) {
     const myKm = myPub.positionKm;
     const in12h = state.fronts.filter(
-      (f) => f.kind !== "piste_endommagee" && f.startTick <= state.tick + 12 * 3600 && f.endTick >= state.tick && Math.abs(f.km - myKm) < f.radiusKm + 120
+      // fenêtre de 12 h en TICKS (12 * 108000) — l'ancienne valeur 12 * 3600
+      // ticks ne couvrait que 24 minutes de course
+      (f) => f.kind !== "piste_endommagee" && f.startTick <= state.tick + 12 * TICKS_PER_HOUR && f.endTick >= state.tick && Math.abs(f.km - myKm) < f.radiusKm + 120
     );
     if (in12h.length > 0) {
       const prevTxt = `Prévision 12 h : ${in12h.slice(0, 2).map((f) => WEATHER_FR[f.kind] ?? f.kind).join(", ")}`;

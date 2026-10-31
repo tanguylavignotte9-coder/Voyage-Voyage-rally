@@ -36,7 +36,7 @@ function mkCar(pace: any = "normale"): CarState {
     spareWheels: 1, budget: 1000, arrived: false, arrivalTime: null, finisherRank: null, forfait: false,
     allowAssist: true, immobilized: false, immobilizedReason: null, immobilizedUntil: null, truckCalledTick: null,
     crevaison: false, crevaisonOrgan: null, sleeping: 0, sleepPlace: null, stopped: false, stopUntilTick: null,
-    stopWork: null, overtaking: "prudent", defending: false, offsetSeconds: 0, lateral: 0, maneuver: null, noPassUntilTick: 0, dailyKm: 0, dayStartTick: 0,
+    stopWork: null, overtaking: "prudent", defending: false, offsetSeconds: 0, lateral: 0, maneuver: null, noPassUntilTick: 0, dustTick: 0, dailyKm: 0, dayStartTick: 0,
     dailyMaxSpeed: 0, mentalLog: [], towedBy: null, transactions: [],
     stats: { distance: 0, maxSpeed: 0, pannes: 0, depenses: 0, primes: 0, accidents: 0, depassements: 0 },
     gear: 1, rpm: 900, throttle: 0, brake: 0,
@@ -379,4 +379,68 @@ test("hud moteur: régime et rapport suivent la vitesse réellement tenue", () =
   assert.equal(carC.gear, gi + 1, "rapport affiché = rapport tenu");
   assert.ok(Math.abs(carC.rpm - expected) < 1, `régime affiché = régime tenu (${carC.rpm.toFixed(0)} vs ${expected.toFixed(0)})`);
   assert.ok(carC.brake > 0, "lever de pied affiché dans le virage");
+});
+
+// ========== UNITÉ DE TEMPS: le moteur tourne à 30 ticks/s, pas 1 ==========
+
+test("départ échelonné: l'intervalle est en secondes réelles", () => {
+  const race = new Race({ seedText: "echel", targetHours: 5, startIntervalSeconds: 60, programWindowMinutes: 60, closureDelayHours: 24 });
+  race.addPlayer("a", "Alice", "#111");
+  race.addPlayer("b", "Bob", "#222");
+  race.addPlayer("c", "Carole", "#333");
+  race.start();
+  const parOffset = (s: number) => race.cars.find((c) => c.offsetSeconds === s)!;
+  // 59 s de course: seule la voiture de offset 0 a bougé
+  for (let i = 0; i < 59 * 30; i++) race.step();
+  assert.ok(parOffset(0).positionKm > 0, "la première voiture roule");
+  assert.equal(parOffset(60).positionKm, 0, "la deuxième n'a pas bougé avant 60 s");
+  assert.equal(parOffset(120).positionKm, 0, "la troisième non plus");
+  // à 61 s: la deuxième part, la troisième attend encore
+  for (let i = 0; i < 2 * 30; i++) race.step();
+  assert.ok(parOffset(60).positionKm > 0, "la deuxième part après 60 s");
+  assert.equal(parOffset(120).positionKm, 0, "la troisième attend son heure");
+  // l'ancienne comparaison ticks/secondes les faisait partir en 2 s
+});
+
+test("station: 400 L en 15 minutes (pas 1 h 40)", () => {
+  const race = new Race({ seedText: "plein", targetHours: 5, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
+  race.addPlayer("a", "Alice", "#111");
+  race.start();
+  const car = race.cars[0];
+  const st = race.world.stations[0];
+  car.positionKm = st.km; // à la station
+  car.fuel = 0;           // 400 L à verser
+  car.rules = [{
+    channel: 2, enabled: true, conditions: [],
+    action: { kind: "ravitaillement", target: { kind: "percent", percent: 100 } },
+    effect: { kind: "default" }, mode: "persistante",
+  }];
+  const t0 = race.tick;
+  race.step();
+  assert.ok(car.stopWork && car.stopWork.fuelTarget !== null, "ravitaillement engagé");
+  const hours = (car.stopUntilTick! - t0) / TICKS_PER_HOUR;
+  // 400 L × 0,000625 h/L = 0,25 h = 15 min (l'ancienne constante 0,0042: 1,68 h)
+  assert.ok(Math.abs(hours - 0.25) < 0.02, `durée du plein = ${hours.toFixed(2)} h (attendu 0,25)`);
+});
+
+test("poussière: fatigue ×1,5, pas +1080/h", () => {
+  const race = new Race({ seedText: "dust", targetHours: 5, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
+  race.addPlayer("lead", "Lead", "#111");
+  race.addPlayer("suiveur", "Suiveur", "#222");
+  race.start();
+  const lead = race.cars[0];
+  const sui = race.cars[1];
+  for (const c of race.cars) c.rules = [{
+    channel: 5, enabled: true, conditions: [], action: { kind: "allure", level: "normale" },
+    effect: { kind: "default" }, mode: "persistante",
+  }];
+  // le suiveur 10 m derrière: il reste dans la fenêtre de poussière (50 m)
+  lead.positionKm = 10;
+  sui.positionKm = 10 - 0.01;
+  for (let i = 0; i < 10 * 60 * 30; i++) race.step(); // 10 minutes de course
+  // suiveur: 5,5/h × 1,5 × (10/60) ≈ 1,4 points de fatigue
+  // (l'ancienne constante: +0,01/tick = +180 pts en 10 min → 100 plafonné)
+  assert.ok(sui.fatigue > 0.7 && sui.fatigue < 5, `fatigue suiveur ${sui.fatigue.toFixed(2)} (attendu ≈1,4)`);
+  assert.ok(sui.dustTick > 0, "le suiveur a été marqué dans la poussière");
+  assert.ok(lead.fatigue < sui.fatigue, "le leader (sans poussière) fatigue moins");
 });
