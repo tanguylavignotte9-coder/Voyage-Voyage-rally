@@ -4,6 +4,7 @@ interface CarPublic {
   playerId: string;
   color: string;
   positionKm: number;
+  lateral: number;   // déport latéral RÉEL en m (+ = gauche de l'axe) — déjà diffusé par le serveur
   speedKmh: number;
   arrived: boolean;
   forfait: boolean;
@@ -149,6 +150,15 @@ function myCar(): MyCar | null {
 // 6 h de course réelles l'écran affichait 20:00 alors qu'il était 14:00, et
 // la nuit visuelle tombait en plein après-midi moteur.
 const TICKS_PER_HOUR = 108000;
+
+// RENDU SPATIAL EXACT: dimensions dupliquées du moteur (packages/engine/src/
+// calibration.ts) — le client est un fichier autonome volontairement (comme
+// TICKS_PER_HOUR ci-dessus). Si le moteur change ces valeurs, les changer ICI
+// aussi: l'écran doit montrer les mêmes mètres que le moteur simule, sinon il
+// ment (piste trop large = fausse impression de place pour dépasser).
+const TRACK_WIDTH_M: Record<string, number> = { large: 12, moyenne: 7.5, etroite: 4.5 };
+const CAR_LEN_M = 4.3;   // longueur de caisse — le franchissement moteur = écart > CAR_LEN
+const CAR_WIDTH_M = 1.9; // largeur de caisse — contact moteur si écart latéral < largeur
 
 function hourOfDay(tick: number): number {
   return (8 + tick / TICKS_PER_HOUR) % 24;
@@ -938,7 +948,7 @@ function altAt(km: number): number {
 
 // ===== Rendu caméra =====
 let camZoom = 0.55; // dézoom par défaut: ~73 m visibles
-let racingOffset = 0; // décalage latéral courant de la racing line
+let latSmooth = 0; // déport latéral RÉEL du moteur, lissé pour le rendu (~100 ms)
 let lastStateTime = 0;
 let extrapolatedKm = 0;
 let lastKnownKm = 0;
@@ -1012,7 +1022,7 @@ function pathPoint(k: number): { x: number; y: number } | null {
 let camX = 0, camY = 0, camAngle = 0;
 let camInit = false;
 
-function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPublic | undefined, now: number, _dt: number): void {
+function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPublic | undefined, now: number, dt: number): void {
   // ÉCHELLE CAMÉRA: ~40 m visibles de large. À 60 km/h le décor défile
   // à ~500 px/s (sensation de vitesse réelle) et la voiture fait ~140 px.
   const PXM = (w / 40) * camZoom; // pixels par mètre
@@ -1029,44 +1039,24 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     return;
   }
   // RACING LINE CONTINUE — apex au MILIEU du virage: on lit la courbure sur une
-  // fenêtre SYMÉTRIQUE (-150/+150 m) et le décalage suit la courbure LOCALE
-  // (forte ici = à l'apex on est à l'intérieur; en approche/sortie on s'ouvre).
-  const roadWm0 = seg?.width === "etroite" ? 3.5 : seg?.width === "moyenne" ? 5 : 6.5;
-  const HALFR = 0.15;
-  let curvHere = 0;
-  {
-    const pA = pathPoint(km - 0.006), pB = pathPoint(km + 0.006);
-    if (pA && pB) {
-      const ax = pB.x - pA.x, ay = pB.y - pA.y;
-      const aLen = Math.hypot(ax, ay) || 1;
-      const gx2 = meAhead.x - meRoad.x, gy2 = meAhead.y - meRoad.y;
-      curvHere = (gx2 * ay - gy2 * ax) / (aLen * (Math.hypot(gx2, gy2) || 1));
-    }
-  }
-  // anticipation: la courbure qui VIENT (devant) déclenche la prise d'extérieur
-  let curvAhead = 0;
-  {
-    const pA = pathPoint(km + 0.02), pB = pathPoint(km + 0.08);
-    if (pA && pB) {
-      const ax = pB.x - pA.x, ay = pB.y - pA.y;
-      const aLen = Math.hypot(ax, ay) || 1;
-      const gx2 = meAhead.x - meRoad.x, gy2 = meAhead.y - meRoad.y;
-      curvAhead = (gx2 * ay - gy2 * ax) / (aLen * (Math.hypot(gx2, gy2) || 1));
-    }
-  }
-  // décalage cible: À L'APEX (courbure locale forte) -> intérieur;
-  // en approche (courbure devant, locale faible) -> extérieur; sortie -> neutre.
-  const breathe = Math.sin(km * 137.3) * roadWm0 * 0.08;
-  const insideNow = Math.max(-1, Math.min(1, -curvHere * 16)) * roadWm0 * 0.5;   // apex: intérieur
-  const outsidePrep = Math.max(-1, Math.min(1, -curvAhead * 16)) * -roadWm0 * 0.4; // approche: extérieur
-  const targetOffset = (Math.abs(curvHere) > 0.06 ? insideNow : outsidePrep) + breathe;
-  // lissage temporel doux: mouvement latéral fluide
-  racingOffset += (targetOffset - racingOffset) * 0.03;
-  // position effective de la voiture: axe du tracé + décalage latéral (normale locale)
+  // DÉPORT LATÉRAL RÉEL (rendu spatial exact): le moteur place chaque voiture
+  // sur l'axe (positionKm) + un déport latéral signé en m (lateral, + = gauche),
+  // déjà diffusé par le serveur dans chaque état. Avant ce patch, l'écran
+  // dessinait une "racing line" COSMÉTIQUE (apex + respiration calculés ici)
+  // pour ma voiture et RIEN pour les rivaux: pendant un dépassement, les deux
+  // caisses se superposaient à l'écran alors que le moteur les avait côte à
+  // côte à plusieurs mètres d'écart. Désormais l'écran montre le déport du
+  // moteur — si deux caisses se touchent à l'écran, elles se touchent dans
+  // le moteur.
   const angRoad = Math.atan2(meAhead.y - meRoad.y, meAhead.x - meRoad.x);
+  // lissage ~100 ms (même standard que le lissage de position du patch 3):
+  // le serveur diffuse tous les ~500 ms et le moteur déporte à 3,2 m/s —
+  // sans lissage, le déport sauterait par crans de ~1,6 m à chaque état reçu.
+  latSmooth += ((myPub?.lateral ?? 0) - latSmooth) * Math.min(1, dt * 10);
+  // position effective de la voiture: axe du tracé + déport latéral (normale locale)
   const me = {
-    x: meRoad.x - Math.sin(angRoad) * racingOffset,
-    y: meRoad.y + Math.cos(angRoad) * racingOffset,
+    x: meRoad.x - Math.sin(angRoad) * latSmooth,
+    y: meRoad.y + Math.cos(angRoad) * latSmooth,
   };
   const carAngle = Math.atan2(meAhead.y - meRoad.y, meAhead.x - meRoad.x);
 
@@ -1114,7 +1104,10 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
   // ±1 km: la route et son environnement sont dessinés loin autour de la
   // voiture (le préchargement de chunks ±8 km couvre largement).
   const half = 1.0;
-  const roadWm = seg?.width === "etroite" ? 3.5 : seg?.width === "moyenne" ? 5 : 6.5;
+  // largeur de piste EXACTE du moteur (TRACK_WIDTH_M): avant, l'écran dessinait
+  // 7/10/13 m contre 4,5/7,5/12 m réels — l'étroite paraissait ~56% trop large
+  // et la moyenne ~33%. roadWm = DEMI-largeur (drawBand trace lineWidth = 2×).
+  const roadWm = (TRACK_WIDTH_M[seg?.width ?? "moyenne"] ?? 7.5) / 2;
   // collecter les points du tracé dans la fenêtre
   const path: { x: number; y: number }[] = [];
   for (let k = km - half; k <= km + half; k += 0.0004) {
@@ -1264,13 +1257,14 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
       if (Math.abs(c.positionKm - km) > half) continue;
       const p = pathPoint(c.positionKm);
       if (!p) continue;
-      drawCar2D(p.x, p.y, c.color, c.speedKmh > 2, W2S, PXM, now, c.positionKm, viewAngle, state!.players.find((pl) => pl.id === c.playerId)?.pseudo);
+      // déport latéral réel: la caisse du rival est EXACTEMENT là où le moteur la met
+      drawCar2D(p.x, p.y, c.color, c.speedKmh > 2, W2S, PXM, now, c.positionKm, viewAngle, c.lateral, state!.players.find((pl) => pl.id === c.playerId)?.pseudo);
     }
   }
 
   // ---------- MA VOITURE: position réelle, cap réel, bouge à l'écran ----------
   if (myPub) {
-    drawCar2D(me.x, me.y, myPub.color, myPub.speedKmh > 2, W2S, PXM, now, km, viewAngle);
+    drawCar2D(meRoad.x, meRoad.y, myPub.color, myPub.speedKmh > 2, W2S, PXM, now, km, viewAngle, latSmooth);
     // états
     const [msx, msy] = W2S(me.x, me.y);
     if (myPub.immobilized) {
@@ -1291,9 +1285,9 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
   }
   // rendu poussière (coordonnées monde)
   for (const p of dustParticles) {
-    p.x += p.vx * _dt;
-    p.y += p.vy * _dt;
-    p.life -= _dt * 1.3;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt * 1.3;
     const [sx, sy] = W2S(p.x, p.y);
     ctx.fillStyle = `rgba(180,160,120,${Math.max(0, p.life) * 0.5})`;
     ctx.beginPath();
@@ -1333,8 +1327,8 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     ctx.strokeStyle = weather === "grele" ? "rgba(220,230,255,0.7)" : "rgba(160,190,230,0.55)";
     ctx.lineWidth = weather === "grele" ? 2.5 : 1.2;
     for (const d of rainDrops) {
-      d.y += (weather === "grele" ? 300 : 460) * _dt;
-      d.x -= 60 * _dt;
+      d.y += (weather === "grele" ? 300 : 460) * dt;
+      d.x -= 60 * dt;
       ctx.beginPath();
       ctx.moveTo(d.x, d.y);
       ctx.lineTo(d.x - 3, d.y + 10);
@@ -1381,15 +1375,20 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
 function drawCar2D(
   wx: number, wy: number, color: string, moving: boolean,
   W2S: (x: number, y: number) => [number, number],
-  PXM: number, now: number, kmOfCar: number, viewAngle: number, label?: string
+  PXM: number, now: number, kmOfCar: number, viewAngle: number, latM: number, label?: string
 ): void {
-  const [sx, sy] = W2S(wx, wy);
-  const L = 2.3, W = 1.05;
-  const bounce = 0; // carrosserie stable: plus de va-et-vient
   // cap de la voiture = tangente du tracé à son km
   const pA = pathPoint(kmOfCar - 0.003);
   const pB = pathPoint(kmOfCar + 0.003);
   const ang = pA && pB ? Math.atan2(pB.y - pA.y, pB.x - pA.x) : 0;
+  // DÉPORT LATÉRAL RÉEL (m, + = gauche de l'axe — même convention que le
+  // moteur): position dessinée = axe + latM sur la normale locale. wx/wy est
+  // la position de la voiture SUR L'AXE du tracé.
+  const [sx, sy] = W2S(wx - Math.sin(ang) * latM, wy + Math.cos(ang) * latM);
+  // dimensions EXACTES du moteur: caisse 4,3 × 1,9 m (l'écran dessinait
+  // 4,6 × 2,1 — caisses ~10% trop grosses, contacts visuels faux)
+  const L = CAR_LEN_M / 2, W = CAR_WIDTH_M / 2;
+  const bounce = 0; // carrosserie stable: plus de va-et-vient
   ctx.save();
   ctx.translate(sx, sy);
   ctx.rotate(ang - viewAngle);
