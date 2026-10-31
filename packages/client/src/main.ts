@@ -112,6 +112,11 @@ function connect(): void {
       }
       return;
     }
+    if (msg.type === "hud") {
+      // HUD conduite 30 Hz (patch 7): un par tick serveur, léger (gear/rpm/pédales)
+      hudFast = msg;
+      return;
+    }
     if (msg.type === "state") {
       msg.pathChunk = pathChunks;
       state = msg;
@@ -949,6 +954,7 @@ function altAt(km: number): number {
 // ===== Rendu caméra =====
 let camZoom = 0.55; // dézoom par défaut: ~73 m visibles
 let latSmooth = 0; // déport latéral RÉEL du moteur, lissé pour le rendu (~100 ms)
+let hudFast: any = null; // dernier message "hud" 30 Hz (pédales/gear/rpm de MA voiture)
 let lastStateTime = 0;
 let extrapolatedKm = 0;
 let lastKnownKm = 0;
@@ -1488,8 +1494,12 @@ function render(): void {
     }
   }
   // ===== HUD CONDUITE: rapport + compte-tours + pédales =====
+  // 30 Hz (patch 7): on dessine le dernier message "hud" (un par tick serveur)
+  // — l'état complet arrivait à ~10 Hz, trop lent pour un freinage d'entrée de
+  // virage. Repli sur l'état complet si l'hud périmé (tick trop vieux).
   {
-    const car = myCar();
+    const full = myCar();
+    const car = hudFast && hudFast.tick >= state.tick - 3 ? hudFast : full;
     if (car) {
       const bw = 220, bh = 96, bx = w - bw - 12, by = h - 30 - bh - 8;
       ctx.fillStyle = "rgba(30,26,20,0.8)";

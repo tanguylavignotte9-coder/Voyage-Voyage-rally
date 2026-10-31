@@ -362,6 +362,19 @@ setInterval(() => {
     lastBroadcast = now;
     broadcastState();
   }
+  // HUD conduite à 30 Hz (patch 7): un message LÉGER par client et par tick —
+  // les pédales/gear/rpm vivent au rythme de la simulation. L'état complet
+  // (~10 Hz) est trop lent pour une jauge de frein qui se resserre en ~1 s à
+  // l'entrée d'un virage. Chaque client ne reçoit que SA voiture.
+  for (const c of clients) {
+    if (c.ws.readyState !== WebSocket.OPEN || !c.playerId) continue;
+    const car = host.race.cars.find((x) => x.playerId === c.playerId);
+    if (!car) continue;
+    c.ws.send(JSON.stringify({
+      type: "hud", tick: host.race.tick, speedKmh: car.speedKmh,
+      gear: car.gear, rpm: car.rpm, throttle: car.throttle, brake: car.brake,
+    }));
+  }
 }, TICK_MS);
 
 setInterval(() => {

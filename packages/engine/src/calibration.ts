@@ -327,6 +327,25 @@ export const TRACK_WIDTH_M = { large: 12, moyenne: 7.5, etroite: 4.5 }; // large
 export const CAR_WIDTH_M = 1.9;                 // largeur d'une voiture
 export const CAR_LEN_M = 4.3;                   // longueur — franchissement = écart > CAR_LEN
 export const LAT_RATE_M_S = 3.2;                // vitesse de déport latéral (m/s)
+
+// ========== DYNAMIQUE LONGITUDINALE (patch 7 — décision: modèle profond) ==========
+// La vitesse est un ÉTAT intégré tick par tick: le pilote freine AVANT le
+// virage (anticipation), accélère progressivement en sortie, et les pédales
+// affichent des signaux RÉELLES (continus). Valeurs = hypothèses de calibration
+// mesurées au banc (à recaler ensemble si nécessaire).
+export const BRAKE_GRIP_SHARE = 0.85;   // part de l'adhérence mobilisable en freinage
+export const BRAKE_PLAN_SHARE = 0.6;    // freinage PLANIFIÉ: 60% de la capacité (commence ~250 m avant, pédale progressive)
+export const LOOKAHEAD_MAX_M = 600;    // anticipation du pilote (m) — ses notes de pace
+export const LOOKAHEAD_STEP_M = 25;    // pas d'échantillonnage de l'anticipation
+export const BRAKE_CONFIDENCE: Record<string, number> = {
+  bas: 0.82,    // prudent: planifie avec moins que ses freins → freine tôt, jamais en survitesse
+  normal: 0.94,
+  haut: 1.06,   // risqué: surestime ses freins → freine tard, peut entrer en survitesse → dérive
+};
+export const OFF_TRACK_GRIP = 0.6;      // adhérence herbe/terre quand une roue sort de piste
+export const DRIFT_OUT_MAX_M = 0.65;    // dérive max hors piste (une roue dehors, pas la voiture)
+export const PARKED_BRAKE = 1;          // pédale de frein affichée à l'arrêt (frein de parking)
+export const OVERTAKE_APPROACH_DECEL = 2.5; // décélération planifiée d'approche d'un rival (m/s²): v = sqrt(vCible² + 2·a·d), le pilote arrive déjà ralenti
 export const ALONGSIDE_OVERLAP_M = 8;          // |écart| < 8 m => chevauchement (côte à côte)
 export const SIDE_CLEARANCE_M = 0.5;           // marge latérale minimale côte à côte
 export const SIDE_EDGE_MARGIN_M = 0.15;        // distance au bord de piste lors d'un dépassement

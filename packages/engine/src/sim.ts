@@ -1,6 +1,8 @@
 import { CarState, OrganId, TerrainSegment, World, WeatherFront, Station, StationWork, TICKS_PER_HOUR, TICKS_PER_SECOND, TRUCK_FIXED_HOURS } from "./types";
 import {
-  CAR_MASS_KG, CAR_POWER_W, TRANSMISSION_EFF, ALTITUDE_POWER_LOSS, AERO_DRAG_COEFF, AIR_DENSITY, ROLLING_RES, LATERAL_GRIP,
+  // NB (patch 7): CAR_POWER_W ("330 ch") retiré — calculé mais JAMAIS lu, code
+  // mort n°2; la vraie puissance passe par torqueCurve × ENGINE_MAX_TORQUE_NM.
+  CAR_MASS_KG, TRANSMISSION_EFF, ALTITUDE_POWER_LOSS, AERO_DRAG_COEFF, AIR_DENSITY, ROLLING_RES, LATERAL_GRIP,
   PACE_SPEED_FACTOR, PACE_CONSUMPTION_FACTOR,
   FUEL_BASE_L_PER_100KM, FUEL_TERRAIN_FACTOR, RISK_CONSUMPTION_FACTOR, WEIGHT_SPEED_PENALTY_FULL,
   RISK_SPEED_BONUS,
@@ -23,6 +25,8 @@ import {
   TOWING_SPEED_FACTOR, FUEL_DENSITY_KG_PER_L, WHEEL_DRIVE_EFF, GRAVITY,
   DRAFT_GAP_MIN_KM, DRAFT_GAP_MAX_KM, DRAFT_SPEED_DIFF, OVERTAKE_GAP_MAX_KM,
   TRACK_WIDTH_M, CAR_WIDTH_M, CAR_LEN_M, LAT_RATE_M_S, ALONGSIDE_OVERLAP_M, SIDE_CLEARANCE_M,
+  BRAKE_GRIP_SHARE, BRAKE_PLAN_SHARE, LOOKAHEAD_MAX_M, LOOKAHEAD_STEP_M, BRAKE_CONFIDENCE, OFF_TRACK_GRIP, DRIFT_OUT_MAX_M, PARKED_BRAKE,
+  OVERTAKE_APPROACH_DECEL,
   OVERTAKE_ALONGSIDE_SPEED_DELTA, SIDE_EDGE_MARGIN_M, OVERTAKE_ACC_PER_S, OVERTAKE_ACC_RISK, OVERTAKE_ACC_CURVE_MIN,
   OVERTAKE_ACC_CURVE_GAIN, DEFEND_ACC_FACTOR, OFFLINE_SPEED_PENALTY, OVERTAKE_FAIL_COOLDOWN_S,
   OVERTAKE_LOOKAHEAD_KM, OVERTAKE_WINDOW_CURVE_MAX,
@@ -46,93 +50,85 @@ export function darknessFactor(hourOfDay: number): number {
   return 0;
 }
 
-// Vitesse d'équilibre ÉMERGENTE: on cherche v tel que
-//   P_dispo × efficacité(v) = F_roulement + F_aéro(v) + F_pente + marge_virage
-// Le virage borne la vitesse par l'adhérence latérale: v_lat = sqrt(mu·g·r).
-// La pente est une FORCE réelle (gravité), pas un malus arbitraire.
-// Résolution par itérations rapides (12 passes suffisent).
-export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string, darkness: number, world?: World): number {
+// Vitesse d'ÉQUILIBRE (physique statique) + DYNAMIQUE LONGITUDINALE (patch 7).
+// L'équilibre: v tel que F_motrice(v) = F_roulement + F_aéro(v) + F_pente; le
+// virage borne par l'adhérence latérale (v_lat = sqrt(mu·g·r)); la pente est
+// une FORCE réelle (gravité). La DYNAMIQUE: la vitesse est un ÉTAT intégré à
+// chaque tick (F = m·a) — la voiture freine AVANT le virage (anticipation
+// 600 m), accélère progressivement en sortie, et expose des pédales RÉELLES.
+// Diagnostic mesuré avant ce patch (banc, 2-3 h): la vitesse téléportait de
+// 187 à 42 km/h en 1 tick (-1210 m/s²), le frein restait à 1.0 pendant tout
+// un virage (8,5 s) et l'accélérateur affichait 70% pendant 2 h d'affilée.
+// NB: l'ancien powerW (CAR_POWER_W, "330 ch") était calculé mais JAMAIS lu —
+// code mort de plus; la vraie puissance passe par le couple moteur (torqueCurve).
+
+// la boîte: rapport optimal pour v (le plus haut sans sur-régimer,
+// rétrograde sous le ralenti)
+function gearFor(vMs: number): number {
+  let best = 0;
+  for (let gi = 0; gi < GEAR_RATIOS.length; gi++) {
+    const rpm = vMs / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI);
+    if (rpm <= ENGINE_REDLINE_RPM * 0.98) best = gi;
+  }
+  while (best > 0) {
+    const rpm = vMs / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[best] * GEAR_FINAL_DRIVE / (2 * Math.PI);
+    if (rpm >= ENGINE_IDLE_RPM) break;
+    best--;
+  }
+  return best;
+}
+
+// le rapport de FORCE (accélération): celui qui maximise le couple à la roue
+// parmi les rapports utilisables (ralenti ≤ rpm ≤ zone rouge). Le tall-gear
+// ci-dessus laisse la voiture en 6e à 40 km/h (900 tr/min, couple 0.3):
+// accélération rampante MESURÉE au banc (46 km/h en 30 s, 6e à 918 tr/min).
+// En accélération, le pilote rétrograde dans la bande de couple — c'est ce
+// rapport qui sert à la force motrice de la dynamique ET au HUD conduite.
+// (engineEquilibrium garde le tall-gear: les équilibres ne changent pas.)
+export function powerGearFor(vMs: number): number {
+  let best = 0, bestF = -1;
+  // les rapports sont triés du PLUS COURT au plus long: la 1re est celle qui
+  // sur-régime le plus vite — on l'IGNORE (continue), on ne casse pas la boucle.
+  // (Première version: break sur sur-régime → la voiture restait bloquée en
+  // 1re à 6000 tr/min à 60 km/h, mesuré, accélération stoppée net.)
+  for (let gi = 0; gi < GEAR_RATIOS.length; gi++) {
+    const rpm = vMs / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI);
+    if (rpm > ENGINE_REDLINE_RPM * 0.98) continue; // trop court ici: le rapport suivant est plus long
+    if (rpm < ENGINE_IDLE_RPM) continue; // sous le ralenti (quasi-arrêt): 1re, embrayage
+    const f = torqueCurve(rpm) * GEAR_RATIOS[gi];
+    if (f > bestF) { bestF = f; best = gi; }
+  }
+  return best;
+}
+
+// la part d'accélérateur consentie: allure × risque × carto × altitude ×
+// nuit × fatigue × usure moteur/transmission × météo (+ refroidissement par
+// canicule/tempête) — un facteur, réutilisé par l'équilibre ET la dynamique
+function throttleShareOf(car: CarState, seg: TerrainSegment, weather: string, darkness: number): number {
   const eff = settingsEffects(car.settings);
-  // puissance motrice disponible (W) — allure + risque + carto
-  // puissance à la roue: moteur × rendement transmission × altitude (le
-  // moteur perd de la puissance en haute montagne — physique, pas un cap)
   const altLoss = 1 - ALTITUDE_POWER_LOSS * Math.min(1, Math.max(0, (seg.altitude - 200) / 3000));
-  const powerW = CAR_POWER_W * TRANSMISSION_EFF * altLoss
-    * (PACE_SPEED_FACTOR[car.pace] ?? 0.7)
-    * (RISK_SPEED_BONUS[car.risk] ?? 1.0) * eff.power;
-  // masse (carburant inclus)
-  const mass = CAR_MASS_KG + car.fuel * FUEL_DENSITY_KG_PER_L;
-  const g = GRAVITY;
-  // forces d'environnement
-  const cr = ROLLING_RES[seg.terrain] ?? 0.04;
-  const mu = LATERAL_GRIP[seg.terrain] ?? 0.5;
-  const slopeFrac = seg.slope / 1000; // ‰ -> fraction
-  // virage: courbure moyenne signée autour de nous (fenêtre ±120 m)
-  const curve = world ? curvatureAt(world, car.positionKm) : 0; // 0..1 (normalisée R=90m)
-  const radius = curve > CURVE_MIN_NORMALIZED ? CURVE_REF_RADIUS_M / curve : Infinity;
-  // vitesse limite en virage: v_max = sqrt(mu × g × r) × audace
-  const daring = (DARING_BY_RISK as Record<string, number>)[car.risk] ?? 0.88;
-  const vTurn = radius === Infinity ? Infinity : Math.sqrt(mu * g * Math.max(20, radius)) * daring;
-
-  // conditions dégradantes (météo/nuit/fatigue/crevaison/USURE): agissent sur
-  // l'ADHÉRENCE et la PUISSANCE — des effets physiques, pas des caps de vitesse
-  // USURE → PERFORMANCE: pneus usés = adhérence en berne (moyenne av/ar, -30%
-  // max à 100%: la voiture glisse et motrice moins). NB: l'ancien powerEff
-  // (effet PUISSANCE de la météo) était calculé mais JAMAIS utilisé — code
-  // mort; l'effet est désormais branché dans throttleShare ci-dessous.
-  const tireWear = (wearFactor(car.organs.pneus_av) + wearFactor(car.organs.pneus_ar)) / 2;
-  let muEff = mu * tireWear;
-  muEff *= WEATHER_GRIP_EFFECT[weather] ?? 1.0;
-  // la nuit on ne voit pas: on limite l'adhérence exploitée (audace)
-  const daringEff = daring * (1 - darkness * NIGHT_AUDACITY_LOSS) * (car.fatigue > FATIGUE_POWER_START ? 1 - ((car.fatigue - FATIGUE_POWER_START) / 100) * FATIGUE_AUDACITY_RATE : 1);
-  // freins usés: le lever de pied en approche de virage est moins efficace
-  // (distances de freinage allongées — même adhérence, moins de ralentissement exploitable)
-  const vTurnEff = radius === Infinity ? Infinity : Math.sqrt(muEff * g * Math.max(20, radius)) * daringEff * wearFactor(car.organs.freins);
-  if (car.crevaison) { /* roulage dégradé: roulement doublé */ }
-
-  // suspensions usées: le train roulant encaisse mal, la caisse tape — la
-  // résistance au roulement grimpe (jusqu'à +30% à 100% d'usure)
-  const crEff = (car.crevaison ? cr * 2.2 : cr) * (1 + (1 - wearFactor(car.organs.suspensions)));
-  const rollingF = crEff * mass * g;
-  const slopeF = slopeFrac * mass * g; // positif = côte (oppose), négatif = descente (aide)
-  const kAero = AERO_HALF * AIR_DENSITY * AERO_DRAG_COEFF;
-
-  // MOTRICITÉ longitudinale: la force tractrice au sol est bornée par
-  // l'adhérence (4 roues motrices: ~0.9 × mu × m × g). Sur piste meuble,
-  // la voiture ne peut pas pousser plus fort que le sol ne le permet.
-  const maxTractionF = WHEEL_DRIVE_EFF * muEff * mass * g;
-  // BOÎTE 6 RAPPORTS: rapport optimal pour v (le plus haut sans sur-régimer,
-  // rétrograde sous le ralenti), couple roue = couple_moteur(rpm) × ratio × pont.
-  const gearFor = (vMs: number): number => {
-    let best = 0;
-    for (let gi = 0; gi < GEAR_RATIOS.length; gi++) {
-      const rpm = vMs / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI);
-      if (rpm <= ENGINE_REDLINE_RPM * 0.98) best = gi;
-    }
-    while (best > 0) {
-      const rpm = vMs / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[best] * GEAR_FINAL_DRIVE / (2 * Math.PI);
-      if (rpm >= ENGINE_IDLE_RPM) break;
-      best--;
-    }
-    return best;
-  };
-  const altLoss2 = 1 - ALTITUDE_POWER_LOSS * Math.min(1, Math.max(0, (seg.altitude - 200) / 3000));
-  // l'accélérateur réel: allure × risque × carto × altitude × NUIT × FATIGUE
-  // (la nuit et la fatigue font lever le pied — effet moteur, pas hardcap)
   const nightThrottle = 1 - darkness * NIGHT_POWER_LOSS;
   const fatigueThrottle = car.fatigue > FATIGUE_POWER_START
     ? 1 - ((car.fatigue - FATIGUE_POWER_START) / 100) * FATIGUE_POWER_RATE : 1;
-  // USURE → PUISSANCE: moteur + transmission dégradent l'accélérateur (moyenne
-  // des deux, -30% max à 100%); le refroidissement usé ne pardonne pas la
-  // canicule/tempête de sable. Et la MÉTÉO pèse enfin sur la puissance: avant
-  // ce patch, WEATHER_POWER_EFFECT alimentait powerEff, une variable morte —
-  // l'effet puissance de la météo n'atteignait jamais la route.
   const powerWear = (wearFactor(car.organs.moteur) + wearFactor(car.organs.transmission)) / 2;
   const coolingWear = (weather === "canicule" || weather === "tempete_sable") ? wearFactor(car.organs.refroidissement) : 1;
-  const throttleShare = (PACE_SPEED_FACTOR[car.pace] ?? 0.7) * (RISK_SPEED_BONUS[car.risk] ?? 1.0)
-    * eff.power * altLoss2 * nightThrottle * fatigueThrottle
+  return (PACE_SPEED_FACTOR[car.pace] ?? 0.7) * (RISK_SPEED_BONUS[car.risk] ?? 1.0)
+    * eff.power * altLoss * nightThrottle * fatigueThrottle
     * (WEATHER_POWER_EFFECT[weather] ?? 1.0) * powerWear * coolingWear;
-  // itération de résolution: le couple de boîte alimente l'équilibre des forces
+}
+
+// Vitesse d'ÉQUILIBRE moteur en m/s (le solveur itératif existant, SANS clamp
+// de virage: la limite de virage est gérée séparément par cornerLimitAt).
+export function engineEquilibrium(car: CarState, seg: TerrainSegment, weather: string, darkness: number): number {
+  const mass = CAR_MASS_KG + car.fuel * FUEL_DENSITY_KG_PER_L;
+  const crEff = (car.crevaison ? (ROLLING_RES[seg.terrain] ?? 0.04) * 2.2 : (ROLLING_RES[seg.terrain] ?? 0.04)) * (1 + (1 - wearFactor(car.organs.suspensions)));
+  const rollingF = crEff * mass * GRAVITY;
+  const slopeF = (seg.slope / 1000) * mass * GRAVITY;
+  const kAero = AERO_HALF * AIR_DENSITY * AERO_DRAG_COEFF;
+  const throttleShare = throttleShareOf(car, seg, weather, darkness);
+  const maxTractionF = WHEEL_DRIVE_EFF * (LATERAL_GRIP[seg.terrain] ?? 0.5)
+    * ((wearFactor(car.organs.pneus_av) + wearFactor(car.organs.pneus_ar)) / 2)
+    * (WEATHER_GRIP_EFFECT[weather] ?? 1.0) * mass * GRAVITY;
   let v = 20;
   for (let i = 0; i < 14; i++) {
     const fTotal = Math.max(50, rollingF + slopeF + kAero * v * v);
@@ -145,26 +141,142 @@ export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string
     v = v + (vNext - v) * CONVERGENCE_DAMPING;
     if (Math.abs(vNext - v) < CONVERGENCE_EPS) break;
   }
-  // le virage borne par la physique (pas un cap arbitraire: c'est l'adhérence)
-  const vWish = v; // équilibre moteur avant limites (sert à l'affichage du frein)
-  if (vTurnEff < v) v = vTurnEff;
-  // remorquage: force supplémentaire (on tire une autre auto)
-  if (car.towedBy) v *= TOWING_SPEED_FACTOR;
-  // état moteur exposé (HUD pédales/régime/rapport) — calculé sur la vitesse
-  // RÉELLEMENT tenue (après les limites physiques). Avant, ce bloc lisait
-  // l'équilibre moteur: le régime paraissait figé pendant que la vitesse
-  // variait, et le frein n'existait qu'en descente.
-  {
-    const gi = gearFor(v);
-    car.gear = gi + 1;
-    car.rpm = Math.max(ENGINE_IDLE_RPM, v / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI));
-    car.throttle = Math.min(1, throttleShare);
-    // frein affiché: descente (frein moteur) OU lever de pied exigé par le virage
-    const brakeSlope = slopeFrac < -0.015 ? Math.min(1, -slopeFrac * 8) : 0;
-    const brakeCurve = vWish > 20 && v < vWish ? Math.min(1, ((vWish - v) / vWish) * 3) : 0;
-    car.brake = Math.max(brakeSlope, brakeCurve);
+  return v;
+}
+
+// Limite de virage (m/s) à la position km — la formule d'adhérence existante,
+// extraite pour être interrogée ICI et dans l'anticipation. Pneus usés =
+// adhérence en berne; freins usés = lever de pied moins efficace; une ROUE
+// HORS PISTE (dérive de survitesse) = l'adhérence herbe/terre chute.
+export function cornerLimitAt(car: CarState, seg: TerrainSegment, weather: string, darkness: number, world: World, km: number): number {
+  const curve = curvatureAt(world, km);
+  if (curve <= CURVE_MIN_NORMALIZED) return Infinity;
+  const radius = CURVE_REF_RADIUS_M / curve;
+  const mu = LATERAL_GRIP[seg.terrain] ?? 0.5;
+  const tireWear = (wearFactor(car.organs.pneus_av) + wearFactor(car.organs.pneus_ar)) / 2;
+  const muEff = mu * tireWear * (WEATHER_GRIP_EFFECT[weather] ?? 1.0);
+  const daring = (DARING_BY_RISK as Record<string, number>)[car.risk] ?? 0.88;
+  const daringEff = daring * (1 - darkness * NIGHT_AUDACITY_LOSS) * (car.fatigue > FATIGUE_POWER_START ? 1 - ((car.fatigue - FATIGUE_POWER_START) / 100) * FATIGUE_AUDACITY_RATE : 1);
+  const halfW = (TRACK_WIDTH_M as Record<string, number>)[seg.width] / 2;
+  const offTrack = Math.abs(car.lateral) > halfW - CAR_WIDTH_M / 2 ? OFF_TRACK_GRIP : 1;
+  return Math.sqrt(muEff * offTrack * GRAVITY * Math.max(20, radius)) * daringEff * wearFactor(car.organs.freins);
+}
+
+// Contrat INCHANGÉ (tests + références): l'équilibre statique AVEC limite de
+// virage — la vitesse qu'une voiture TIENDAIT à cet instant. La vitesse
+// réellement tenue vient désormais de dynamicSpeed (intégration tick par tick).
+export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string, darkness: number, world?: World): number {
+  let v = engineEquilibrium(car, seg, weather, darkness);
+  if (world) {
+    const vc = cornerLimitAt(car, seg, weather, darkness, world, car.positionKm);
+    if (vc < v) v = vc;
   }
+  if (car.towedBy) v *= TOWING_SPEED_FACTOR;
   return Math.max(0, v * 3.6); // m/s -> km/h
+}
+
+// DYNAMIQUE LONGITUDINALE (patch 7 — décision: modèle profond):
+// 1. la vitesse est un ÉTAT (car.speedKmh) intégré à chaque tick: plus de
+//    téléportation entre équilibres;
+// 2. le pilote ANTICIPE (600 m): vAllowed = sqrt(vLim² + 2·a·d) — il freine
+//    AVANT le virage et AVANT le terrain lent, pas à l'entrée;
+// 3. capacité de freinage = adhérence × part freinage × usure des freins
+//    (décision: l'usure allonge les distances), et la CONFIANCE au freinage
+//    suit le profil de risque: le risqué freine tard, entre en survitesse
+//    et dérive — l'accident se paie hors piste (adhérence chute);
+// 4. les pédales sont RÉELLES: frein = décélération exigée / capacité,
+//    accélérateur = force employée / force disponible — signaux continus.
+function dynamicSpeed(car: CarState, ctx: SimContext, seg: TerrainSegment, weather: string, darkness: number, envScale: number): number {
+  const dt = TICK_SECONDS;
+  const g = GRAVITY;
+  let v = Math.max(0, car.speedKmh / 3.6); // ÉTAT en m/s, persiste entre ticks
+  const mass = CAR_MASS_KG + car.fuel * FUEL_DENSITY_KG_PER_L;
+  const mu = LATERAL_GRIP[seg.terrain] ?? 0.5;
+  const tireWear = (wearFactor(car.organs.pneus_av) + wearFactor(car.organs.pneus_ar)) / 2;
+  const muEff = mu * tireWear * (WEATHER_GRIP_EFFECT[weather] ?? 1.0);
+  const aBrakeMax = muEff * g * BRAKE_GRIP_SHARE * wearFactor(car.organs.freins);
+  // cible de base: équilibre moteur et limite de virage à la position actuelle
+  // (remorquage: on tire une autre auto — abstraction conservée du moteur)
+  let vEqHere = engineEquilibrium(car, seg, weather, darkness);
+  if (car.towedBy) vEqHere *= TOWING_SPEED_FACTOR;
+  const vLimHere = cornerLimitAt(car, seg, weather, darkness, ctx.world, car.positionKm);
+  let vTarget = Math.min(vEqHere, vLimHere);
+  // ANTICIPATION (notes de pace): la contrainte la plus forte DEVANT, ramenée
+  // à la vitesse qu'on peut encore tenir ICI: vAllowed = sqrt(vLim² + 2·a·d).
+  const conf = (BRAKE_CONFIDENCE as Record<string, number>)[car.risk] ?? 0.94;
+  // freinage PLANIFIÉ à une fraction de la capacité (0.6): sans cette marge,
+  // vReach ne contraint qu'au dernier moment (~140 m) et le déficit exigé
+  // d'un coup colle la pédale à 1.0 — le défaut historique. À 60%, le freinage
+  // commence ~250 m avant l'obstacle et la pédale monte progressivement.
+  const aBrakePlan = Math.max(0.1, aBrakeMax * conf * BRAKE_PLAN_SHARE);
+  let segPrev: TerrainSegment | null = null;
+  let vEqPrev = 0;
+  for (let d = LOOKAHEAD_STEP_M; d <= LOOKAHEAD_MAX_M; d += LOOKAHEAD_STEP_M) {
+    const kmA = car.positionKm + d / 1000;
+    const segA = segmentAt(ctx.world.segments, kmA);
+    let vLimD = cornerLimitAt(car, segA, weather, darkness, ctx.world, kmA);
+    if (segA !== seg) {
+      // frontière de terrain dans la fenêtre: l'équilibre moteur change là —
+      // le pilote voit le marécage/les dunes arriver et lève le pied avant
+      if (segA !== segPrev) { vEqPrev = engineEquilibrium(car, segA, weather, darkness) * (car.towedBy ? TOWING_SPEED_FACTOR : 1); segPrev = segA; }
+      if (vEqPrev < vLimD) vLimD = vEqPrev;
+    }
+    const vReach = Math.sqrt(vLimD * vLimD + 2 * aBrakePlan * d);
+    if (vReach < vTarget) vTarget = vReach;
+  }
+  // FACTEURS D'ENVIRONNEMENT (correctif tempête d'accrochages): poussière,
+  // bord sale en virage, aspiration — des échelles de CIBLE, pas des
+  // multiplicateurs d'état. Appliqués à la vitesse filée par tick, un facteur
+  // ×0.5/tick la pompait exponentiellement: équilibre v_pin = a·dt/(1/p − 1),
+  // soit 3,4 km/h mesurés pendant 6 minutes (voiture garée sur la piste,
+  // phase côte à côte collée, accrochages fantômes à 900 m). En échelle de
+  // cible, le pilote tient DURABLEMENT la vitesse d'environnement et
+  // récupère quand elle disparaît.
+  vTarget *= envScale;
+  // résistances à la vitesse courante (pour l'accélération et la pédale)
+  const crEff = (car.crevaison ? (ROLLING_RES[seg.terrain] ?? 0.04) * 2.2 : (ROLLING_RES[seg.terrain] ?? 0.04)) * (1 + (1 - wearFactor(car.organs.suspensions)));
+  const rollingF = crEff * mass * g;
+  const slopeF = (seg.slope / 1000) * mass * g; // positif = côte (oppose)
+  const kAero = AERO_HALF * AIR_DENSITY * AERO_DRAG_COEFF;
+  const Fres = Math.max(0, rollingF + slopeF + kAero * v * v);
+  // force motrice disponible à v (boîte + couple + part d'accélérateur)
+  const throttleShare = throttleShareOf(car, seg, weather, darkness);
+  const gi = powerGearFor(v);
+  const rpm = v / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI);
+  const fGear = torqueCurve(rpm) * ENGINE_MAX_TORQUE_NM * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE
+    * TRANSMISSION_EFF / WHEEL_RADIUS_M * throttleShare;
+  const Fmax = Math.min(fGear, WHEEL_DRIVE_EFF * muEff * mass * g); // borné traction
+  if (v < vTarget) {
+    // ACCÉLÉRER (traction-borné), sans dépasser la cible: la remontée en
+    // sortie de virage est progressive (F = m·a), plus de saut à l'équilibre
+    const aWish = (vTarget - v) / dt;
+    const a = Math.min(Math.max(0, (Fmax - Fres) / mass), aWish);
+    v = Math.min(vTarget, v + a * dt);
+    // pédale: la part de la force disponible réellement employée
+    car.throttle = Math.min(1, (mass * a + Fres) / Math.max(Fmax, 1));
+    car.brake = 0;
+  } else if (v > vTarget) {
+    // FREINER: la décélération exigée par la cible (qui se resserre à
+    // l'approche du virage → frein fort à l'ENTRÉE puis relâche dans le
+    // virage — plus jamais "à fond tout le virage"), bornée par la capacité
+    const aNeed = Math.min(aBrakeMax, (v - vTarget) / dt);
+    v = Math.max(vTarget, v - aNeed * dt);
+    car.brake = aBrakeMax > 0 ? aNeed / aBrakeMax : 1;
+    car.throttle = 0;
+  } else {
+    // TENIR la vitesse: accélérateur = frottements / force disponible
+    car.throttle = Math.min(1, Fres / Math.max(Fmax, 1));
+    car.brake = 0;
+  }
+  // (la SURVITESSE → dérive extérieure est appliquée dans tickCarInternal,
+  // APRÈS applyTrafficEffects: son recentrage vers l'axe (0,064 m/tick puis
+  // snap à 0 sous 5 cm) annulait exactement une dérive de même amplitude
+  // posée ici — mesuré: |lateral| 0,00 pendant 20 ticks de survitesse)
+  // état moteur exposé (HUD 30 Hz): rapport et régime de la vitesse RÉELLE
+  const giHud = powerGearFor(v);
+  car.gear = giHud + 1;
+  car.rpm = Math.max(ENGINE_IDLE_RPM, v / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[giHud] * GEAR_FINAL_DRIVE / (2 * Math.PI));
+  return Math.max(0, v * 3.6); // km/h
 }
 
 export interface SimContext {
@@ -255,6 +367,11 @@ export function grantPrime(car: CarState, tick: number, label: string, amount: n
 
 function tickCarInternal(car: CarState, ctx: SimContext, emit: (t: string) => void): void {
   if (car.arrived || car.forfait) return;
+  // PÉDALES à l'arrêt (patch 7): voiture garée — régime ralenti, frein de
+  // parking affiché (avant: régime/pédales figés à la dernière valeur roulée).
+  if (car.immobilized || car.stopWork || car.sleeping > 0) {
+    car.gear = 1; car.rpm = ENGINE_IDLE_RPM; car.throttle = 0; car.brake = PARKED_BRAKE;
+  }
 
   const seg = segmentAt(ctx.world.segments, car.positionKm);
   const weather = weatherAt(ctx.fronts, ctx.tick, car.positionKm);
@@ -331,8 +448,62 @@ function tickCarInternal(car: CarState, ctx: SimContext, emit: (t: string) => vo
 
   const riskFactor = 1; // le risque agit via l'audace physique (charges/accidents)
 
-  let speed = computeSpeed(car, seg, weather, darkness, ctx.world);
-  speed = applyTrafficEffects(car, ctx, speed, riskFactor, emit);
+  // DYNAMIQUE LONGITUDINALE (patch 7): la vitesse est un état INTÉGRÉ —
+  // accélération/freinage progressifs, anticipation 600 m, pédales réelles.
+  // FACTEURS D'ENVIRONNEMENT (correctif tempête d'accrochages): échelle de
+  // cible poussière / bord sale / aspiration, calculée sur l'état du tick —
+  // les effets équivalents de applyTrafficEffects ne multiplient plus la
+  // vitesse: sur un état intégré, un facteur par tick se composait (×0.5/tick
+  // = voiture garée à 3,4 km/h des minutes durant, aspirait le peloton
+  // dedans, et la phase côte à côte sans sortie tirait des accrochages
+  // fantômes à 900 m — 8/10 morts en 1 h de bench).
+  let envScale = 1;
+  {
+    const curveNow = curvatureAt(ctx.world, car.positionKm);
+    const halfWNow = (TRACK_WIDTH_M as Record<string, number>)[seg.width] / 2;
+    // bord sale en virage (déporté): le pilote vise une vitesse réduite
+    if (Math.abs(car.lateral) > halfWNow * 0.4 && curveNow > 0.05) envScale *= OFFLINE_SPEED_PENALTY;
+    for (const o of ctx.allCars) {
+      if (o.playerId === car.playerId || o.arrived || o.forfait) continue;
+      const gapKm = o.positionKm - car.positionKm;
+      if (gapKm > DRAFT_GAP_MIN_KM && gapKm < DRAFT_GAP_MAX_KM && Math.abs(o.speedKmh - car.speedKmh) < DRAFT_SPEED_DIFF) {
+        envScale *= 1.03; // aspiration: +3% de cible
+      } else if (gapKm > 0 && gapKm < DUST_GAP_KM && Math.abs(car.lateral - o.lateral) < CAR_WIDTH_M) {
+        envScale *= DUST_SPEED_FACTOR; // dans la poussière: cible réduite
+      }
+    }
+  }
+  let speed = dynamicSpeed(car, ctx, seg, weather, darkness, envScale);
+  // vitesse DEMANDÉE (l'équilibre) pour le filtre "plus lent que moi" du
+  // dépassement: la vitesse INTÉGRÉE est plafonnée par le rival suivi dans la
+  // poussière — un filtre sur l'état intégré interdisait tout ré-engagement
+  // une fois collé derrière un lent (le rapide ne repassait jamais).
+  const vDemand = computeSpeed(car, seg, weather, darkness, ctx.world);
+  speed = applyTrafficEffects(car, ctx, speed, riskFactor, emit, vDemand);
+
+  // SURVITESSE en virage (décision: l'accident se paie hors piste): freinage
+  // insuffisant → la voiture glisse vers l'EXTÉRIEUR; une roue peut sortir
+  // (l'adhérence chute: OFF_TRACK_GRIP dans cornerLimitAt) et la demande
+  // latérale alimente l'accident émergent existant (× agressivité). Ici,
+  // APRÈS applyTrafficEffects: avant ce déplacement, le recentrage vers
+  // l'axe (0,064 m/tick + snap 5 cm) annulait la dérive posée en amont.
+  if (!car.maneuver) {
+    const vLimHere = cornerLimitAt(car, seg, weather, darkness, ctx.world, car.positionKm);
+    const vMs = speed / 3.6;
+    if (vLimHere !== Infinity && vMs > vLimHere * 1.001) {
+      const dir = -Math.sign(curvatureSignedAt(ctx.world, car.positionKm) || 1); // extérieur
+      const over = (vMs * vMs) / (vLimHere * vLimHere) - 1;
+      // le glissement de décrochage est PLUS RAPIDE qu'un déplacement contrôlé:
+      // plafond 2×latStep. Mesuré: à 1×latStep, le recentrage d'applyTrafficEffects
+      // (0,064 m) + son snap "< 5 cm → 0" annulaient exactement le gain net
+      // (0,043 m < 0,05) — la voiture oscillait 0 ↔ −0,107 sans jamais dériver.
+      const latStep = LAT_RATE_M_S * TICK_SECONDS;
+      car.lateral += dir * Math.min(2 * latStep, (0.3 + over * 2) * latStep);
+      const halfW = (TRACK_WIDTH_M as Record<string, number>)[seg.width] / 2;
+      const bound = halfW - CAR_WIDTH_M / 2 + DRIFT_OUT_MAX_M; // une roue dehors, pas la voiture
+      car.lateral = Math.max(-bound, Math.min(bound, car.lateral));
+    }
+  }
 
   // Arrêt planifié: si des prestations sont demandées mais qu'on n'est pas encore à la station,
   // la voiture s'arrête à la station suivante (elle ne dépasse jamais la station visée).
@@ -560,7 +731,8 @@ export function applyTrafficEffects(
   ctx: SimContext,
   speed: number,
   _riskFactor: number,
-  emit: (t: string) => void
+  emit: (t: string) => void,
+  vDemand?: number
 ): number {
   let v = speed;
   const seg = segmentAt(ctx.world.segments, car.positionKm);
@@ -589,10 +761,17 @@ export function applyTrafficEffects(
       // reste bloqué.
       const latTarget = m.side * (halfW - CAR_WIDTH_M / 2 - SIDE_EDGE_MARGIN_M);
       car.lateral += Math.sign(latTarget - car.lateral) * Math.min(latStep, Math.abs(latTarget - car.lateral));
-      // à moins de 35 m: on ne fond plus sur le rival, on arrive à vitesse
-      // maîtrisée (le côte à côte dure plusieurs secondes, pas un cheveu)
-      if (gapM < 35) {
-        v = Math.min(v, target.speedKmh + OVERTAKE_ALONGSIDE_SPEED_DELTA);
+      // ARRIVÉE PLANIFIÉE: on ne fond pas sur le rival — la consigne est une
+      // COURBE de freinage, pas un cap instantané: v ≤ sqrt(vCible² + 2·a·(d−35)),
+      // puis le plafond plein à 35 m. (Avec l'état intégré, le cap sec à 35 m
+      // téléportait la vitesse d'un coup: −23 km/h en 1 tick, mesuré.)
+      {
+        const vCapMs = (target.speedKmh + OVERTAKE_ALONGSIDE_SPEED_DELTA) / 3.6;
+        const vPlan = Math.sqrt(vCapMs * vCapMs + 2 * OVERTAKE_APPROACH_DECEL * Math.max(0, gapM - 35));
+        v = Math.min(v, vPlan * 3.6);
+        if (gapM < 35) {
+          v = Math.min(v, target.speedKmh + OVERTAKE_ALONGSIDE_SPEED_DELTA);
+        }
       }
       if (Math.abs(gapM) < ALONGSIDE_OVERLAP_M) {
         m.phase = "cote_a_cote";
@@ -606,7 +785,15 @@ export function applyTrafficEffects(
       const gapM = (target.positionKm - car.positionKm) * 1000;
       if (gapM <= 0) m.crossed = true;
       const latSep = Math.abs(car.lateral - target.lateral);
-      if (latSep < CAR_WIDTH_M + SIDE_CLEARANCE_M && !target.immobilized) {
+      // ÉCHAPPÉE (correctif tempête d'accrochages): la phase côte à côte
+      // n'avait AUCUNE sortie quand le rival s'éloignait — la manœuvre
+      // restait collée des kilomètres durant (mesuré: 6 min, écart 987 m)
+      // pendant que le tirage d'accrochage tournait à distance. Abandon
+      // propre, comme en approche.
+      if (gapM > m.startGapM + 20 || gapM > OVERTAKE_GAP_MAX_KM * 1000) {
+        m.phase = "decrochage";
+        car.noPassUntilTick = ctx.tick + OVERTAKE_FAIL_COOLDOWN_S * TICKS_PER_SECOND;
+      } else if (latSep < CAR_WIDTH_M + SIDE_CLEARANCE_M && !target.immobilized) {
         // pas encore la place latérale: on se tient PRÊT, derrière
         v = Math.min(v, target.speedKmh);
         // bloqué trop longtemps sans place: abandon propre
@@ -616,15 +803,24 @@ export function applyTrafficEffects(
         }
       } else {
         // place réelle à côté: l'écart de vitesse se resserre (on ne "vole"
-        // pas à côté) et le bord de piste est sale
-        v = Math.min(v, target.speedKmh + OVERTAKE_ALONGSIDE_SPEED_DELTA) * 0.97;
+        // pas à côté) et le bord de piste est sale.
+        // NB (correctif tempête d'accrochages): le ×0.97 s'applique au
+        // PLAFOND, pas à la vitesse d'état — composé par tick sur l'état
+        // intégré, il la pompait vers ~2 km/h (le doublard ne récupère que
+        // ~0,6 m/s² dans le sable: v_pin = a·dt/(1/0,97 − 1), mesuré 2,3 km/h
+        // côte à côte sur le sable, dépassement mort-né).
+        v = Math.min(v, (target.speedKmh + OVERTAKE_ALONGSIDE_SPEED_DELTA) * 0.97);
         const curveFactor = OVERTAKE_ACC_CURVE_MIN + OVERTAKE_ACC_CURVE_GAIN * curve * curve;
         const perS =
           ((OVERTAKE_ACC_PER_S as Record<string, number>)[car.overtaking] ?? 0) *
           ((OVERTAKE_ACC_RISK as Record<string, number>)[car.risk] ?? 1) *
           curveFactor *
           (target.defending ? DEFEND_ACC_FACTOR : 1);
-        if (target.speedKmh > 10 && ctx.rng.chance(perS * TICK_SECONDS)) {
+        // ACCROCHAGE = contact PHYSIQUE: seulement en chevauchement réel
+        // (garde du correctif: la phase pouvait traîner, le tirage tournait
+        // aussi à 900 m — accrochages fantômes, chassis +20/+15 sortis de
+        // nulle part, 8/10 morts en 1 h de bench)
+        if (Math.abs(gapM) <= ALONGSIDE_OVERLAP_M + CAR_LEN_M && target.speedKmh > 10 && ctx.rng.chance(perS * TICK_SECONDS)) {
           // ACCROCHAGE — seulement ici, côte à côte, jamais à distance
           car.stats.accidents++;
           target.stats.accidents++;
@@ -665,7 +861,9 @@ export function applyTrafficEffects(
       }
     }
     // hors trajectoire en virage: le bord de piste est sale (cailloux, souches)
-    if (Math.abs(car.lateral) > halfW * 0.4 && curve > 0.05) v *= OFFLINE_SPEED_PENALTY;
+    // (échelle de CIBLE: envScale dans tickCarInternal — un ×0.5/tick sur
+    // l'état intégré garait la voiture à 3,4 km/h: effondrement exponentiel,
+    // 6 min mesurées en phase côte à côte collée)
   } else {
     // pas de manœuvre: retour progressif à la trajectoire idéale (centre)
     car.lateral -= Math.sign(car.lateral) * Math.min(latStep * 0.6, Math.abs(car.lateral));
@@ -682,13 +880,12 @@ export function applyTrafficEffects(
         (o) =>
           o.positionKm - car.positionKm > 0 &&
           o.positionKm - car.positionKm < OVERTAKE_GAP_MAX_KM &&
-          // "plus lent que moi" se juge sur la vitesse DEMANDÉE ce tick (le
-          // paramètre speed), pas sur car.speedKmh: dans le sillage, la vitesse
-          // d'État est plafonnée à celle du rival, et l'ancien filtre se
-          // désarmait après un premier refus de fenêtre — plus jamais de
-          // candidat, donc plus jamais de ré-engagement quand la fenêtre
-          // s'ouvrait (3 tests de dépassement passés en échec).
-          o.speedKmh < speed * DUST_SPEED_FACTOR &&
+          // "plus lent que moi" se juge sur la vitesse DEMANDÉE (l'équilibre,
+          // paramètre vDemand), pas sur la vitesse tenue: dans le sillage,
+          // l'état intégré est plafonné à celle du rival (patch 7) et un filtre
+          // sur l'état interdisait tout ré-engagement une fois collé derrière
+          // un lent. Fallback sur speed pour les appels directs (tests).
+          o.speedKmh < (vDemand ?? speed) * DUST_SPEED_FACTOR &&
           !blockedIds.has(o.playerId)
       );
       if (candidates.length > 0) {
@@ -733,12 +930,15 @@ export function applyTrafficEffects(
   for (const other of others) {
     const gap = other.positionKm - car.positionKm;
     if (gap > DRAFT_GAP_MIN_KM && gap < DRAFT_GAP_MAX_KM && Math.abs(other.speedKmh - car.speedKmh) < DRAFT_SPEED_DIFF) {
-      v *= 1.03;
+      // (l'aspiration est une échelle de CIBLE: envScale dans tickCarInternal —
+      // un ×1.03/tick sur l'état intégré s'accumulait sans borne)
       mental(car, ctx.tick, "Je suis dans le sillage, ça glisse tout seul.");
     } else if (gap > 0 && gap < DUST_GAP_KM && Math.abs(car.lateral - other.lateral) < CAR_WIDTH_M) {
       // POUSSIÈRE — seulement dans le sillage LATÉRAL du rival: se déporter,
-      // c'est en sortir (le cœur du dépassement spatial)
-      v *= DUST_SPEED_FACTOR;
+      // c'est en sortir (le cœur du dépassement spatial).
+      // (la perte de vitesse est une échelle de CIBLE: envScale dans
+      // tickCarInternal — un ×0.9/tick sur l'état intégré pompait la vitesse
+      // vers ~32 km/h quel que soit le rival, mesuré)
       // SANS manœuvre, traverser un rival est PHYSIQUEMENT impossible:
       // on suit. Seule une manœuvre latérale réelle permet de dépasser.
       if (!car.maneuver && !other.immobilized) v = Math.min(v, other.speedKmh);
@@ -774,8 +974,18 @@ const SYMPTOMS: Record<OrganId, { vague: string; grave: string }> = {
 // en douceur ça vieillit à peine, à 200 km/h sur pierrier ça explose.
 // La PANNE est un ÉCHEC DE CHARGE: contrainte > résistance résiduelle
 // (usure + dispersion matérielle) — un organe neuf encaisse, un usé cède.
-function computeOrganLoads(car: CarState, seg: TerrainSegment, weather: string, darkness: number, v: number): Record<string, number> {
-  const gearIdx = Math.max(0, Math.min(GEAR_RATIOS.length - 1, (car.gear || 1) - 1));
+function computeOrganLoads(car: CarState, seg: TerrainSegment, weather: string, darkness: number, v: number, vGearRef?: number): Record<string, number> {
+  // (patch 7) le rapport de la charge = tall-gear à la vitesse d'ÉQUILIBRE
+  // (vGearRef, passée par wearUpdate), ni le rapport HUD ni le rapport à la
+  // vitesse réelle: en 1re au lancement, fTraction ×1.05 ≈ 11-12 kN dépassait
+  // la charge nominale de la transmission (9500 N) → "casse transmission" à
+  // 12 km/h après quelques secondes, mesuré. La calibration des charges
+  // (patch 5, banc) est conservée EXACTEMENT: avant la dynamique, la charge
+  // était toujours évaluée à la vitesse d'équilibre en tall-gear. Bosse et
+  // choc restent évalués à la vitesse RÉELLE (physique). Étiquette
+  // d'honnêteté: le couple réel de 1re au lancement n'est pas encore dans le
+  // modèle de charge (à étalonner ensemble).
+  const gearIdx = gearFor((vGearRef ?? v) / 3.6);
   const mass = CAR_MASS_KG + car.fuel * FUEL_DENSITY_KG_PER_L;
   const g = GRAVITY;
   const cr = ROLLING_RES[seg.terrain] ?? 0.04;
@@ -824,7 +1034,11 @@ function wearUpdate(
 ): void {
   const v = car.speedKmh;
   const darkness = darknessFactor(ctx.hourOfDay(ctx.tick));
-  const loads = computeOrganLoads(car, seg, weather, darkness, v);
+  // (patch 7) référence de charge = vitesse d'ÉQUILIBRE (computeSpeed), comme
+  // avant la dynamique: la voiture ne peut plus téléporter, mais le modèle de
+  // charge garde l'étalonnage de son banc (voir computeOrganLoads).
+  const vEqLoad = computeSpeed(car, seg, weather, darkness, ctx.world);
+  const loads = computeOrganLoads(car, seg, weather, darkness, v, vEqLoad);
   const dtH = TICK_SECONDS / 3600;
   for (const organ of Object.keys(car.organs) as OrganId[]) {
     const model = ORGAN_MODELS[organ];
@@ -870,11 +1084,21 @@ function probabilisticFailure(car: CarState, ctx: SimContext, emit: (t: string) 
   // pneus usés: l'accident émergent devient plus probable (l'adhérence RÉELLE
   // est dégradée par l'usure, pas seulement par météo/nuit/fatigue)
   const tireWearAcc = (wearFactor(car.organs.pneus_av) + wearFactor(car.organs.pneus_ar)) / 2;
-  const muEff = mu * vigueur * tireWearAcc * (1 - darkness * OVERTAKE_NIGHT_GRIP_LOSS) * (weather === "pluie_diluvienne" || weather === "tempete_sable" ? RAIN_GRIP_FACTOR : 1);
+  // une ROUE HORS PISTE (dérive de survitesse, patch 7): l'adhérence herbe/terre chute
+  const offTrack = Math.abs(car.lateral) > ((TRACK_WIDTH_M as Record<string, number>)[seg.width] ?? 7.5) / 2 - CAR_WIDTH_M / 2;
+  const muEff = mu * vigueur * tireWearAcc * (1 - darkness * OVERTAKE_NIGHT_GRIP_LOSS) * (weather === "pluie_diluvienne" || weather === "tempete_sable" ? RAIN_GRIP_FACTOR : 1) * (offTrack ? OFF_TRACK_GRIP : 1);
   const vMs = car.speedKmh / 3.6;
   // demande latérale vs capacité: l'excès est le moteur de l'accident
   if (radius !== Infinity && car.speedKmh > 3) {
-    const demand = (vMs * vMs) / radius;
+    // cercle de friction simplifié (patch 7): en freinage fort la voiture ne
+    // suit PAS encore la courbe — l'adhérence va au freinage (BRAKE_GRIP_SHARE),
+    // la demande latérale EFFECTIVE chute. Mesuré avant: les transitoires de
+    // la dynamique (changement de terrain: la cible chute d'un coup, la
+    // voiture décélère physiquement à ~5 m/s²) tenaient un excès de 0.5-0.8
+    // pendant ~90 ticks → tempête d'accidents (8/10 archétypes immobilisés en
+    // 12 h, même les prudents). En survitesse NON freinée, l'accident paie
+    // toujours — et la dérive de sortie de piste (offTrack ×0.6) paie aussi.
+    const demand = (vMs * vMs) / radius * (1 - BRAKE_GRIP_SHARE * car.brake);
     const capacity = muEff * 9.81;
     const excess = (demand / capacity - 1) * RISK_ACCIDENT_FACTOR[car.risk];
     if (excess > 0) {

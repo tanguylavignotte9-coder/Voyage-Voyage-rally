@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { generateWorld, roadAhead } from "./world";
+import { generateWorld, roadAhead, segmentAt, curvatureAt } from "./world";
 import { Rng, seedFromString } from "./rng";
 import { Race, PRIME_HOUR } from "./race";
-import { darknessFactor, computeSpeed, applyTrafficEffects, resolveContactFault, SimContext, TICK_SECONDS, buildVariables } from "./sim";
+import { darknessFactor, computeSpeed, applyTrafficEffects, resolveContactFault, SimContext, TICK_SECONDS, buildVariables, cornerLimitAt, powerGearFor } from "./sim";
 import { CAR_LEN_M, GEAR_RATIOS, GEAR_FINAL_DRIVE, WHEEL_RADIUS_M, ENGINE_IDLE_RPM, ENGINE_REDLINE_RPM, wearFactor } from "./calibration";
 import { CarState, DEFAULT_RULES, TICKS_PER_HOUR, OrganId, TerrainSegment } from "./types";
 
@@ -347,40 +347,28 @@ test("conscience: on attend la fenêtre ouverte pour s'engager", () => {
 });
 
 // ========== HUD MOTEUR: régime et rapport suivent la vitesse tenue ==========
+// (patch 7: computeSpeed ne touche plus aux champs HUD — c'est dynamicSpeed,
+// appelé par tickCarInternal via race.step(), qui met gear/rpm/pédales à jour;
+// le test passe donc par la course réelle, pas par l'équilibre statique)
 
 test("hud moteur: régime et rapport suivent la vitesse réellement tenue", () => {
-  const mkW = (curv: number) => ({
-    segments: [{ km: 0, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "large" }],
-    points: Array.from({ length: 60 }, (_, i) => ({ km: (i * 20) / 1000, x: 0, y: 0, z: 0, curvature: curv })),
-  }) as any;
-  const seg = mkW(0).segments[0];
-  // référence: même voiture, même piste, en ligne droite
-  const carF = mkCar("attaque");
-  carF.positionKm = 0.6;
-  const vFree = computeSpeed(carF, seg, "clair", 0, mkW(0));
-  // même situation, mais un virage fort (courbure brute 0,01 -> normalisée 0,9)
-  const carC = mkCar("attaque");
-  carC.positionKm = 0.6;
-  const v = computeSpeed(carC, seg, "clair", 0, mkW(0.01));
-  assert.ok(v < vFree, `le virage bride la vitesse (v=${v.toFixed(0)} < vFree=${vFree.toFixed(0)})`);
-  // rapport et régime exposés = ceux de la vitesse TENUE, pas du souhait moteur
-  const vMs = v / 3.6;
-  let gi = 0;
-  for (let g2 = 0; g2 < GEAR_RATIOS.length; g2++) {
-    const r = (vMs / WHEEL_RADIUS_M) * 60 * GEAR_RATIOS[g2] * GEAR_FINAL_DRIVE / (2 * Math.PI);
-    if (r <= ENGINE_REDLINE_RPM * 0.98) gi = g2;
-  }
-  while (gi > 0) {
-    const r = (vMs / WHEEL_RADIUS_M) * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI);
-    if (r >= ENGINE_IDLE_RPM) break;
-    gi--;
-  }
+  const race = new Race({ seedText: "hud-moteur", targetHours: 3, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
+  race.addPlayer("pilote", "Pilote", "#111");
+  race.start();
+  const car = race.cars[0];
+  car.rules = [{ channel: 5, enabled: true, conditions: [], action: { kind: "allure", level: "normale" }, effect: { kind: "default" }, mode: "persistante" }];
+  for (let i = 0; i < 2 * 60 * 30; i++) race.step(); // 2 min de course
+  assert.ok(car.speedKmh > 25, `la voiture roule (${car.speedKmh.toFixed(0)} km/h)`);
+  // rapport et régime exposés = ceux de la vitesse TENUE (le rapport de FORCE,
+  // celui qui pousse — en 6e à 918 tr/min la voiture n'accélérait pas)
+  const vMs = car.speedKmh / 3.6;
+  const gi = powerGearFor(vMs);
   const expected = Math.max(ENGINE_IDLE_RPM, (vMs / WHEEL_RADIUS_M) * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI));
-  assert.equal(carC.gear, gi + 1, "rapport affiché = rapport tenu");
-  assert.ok(Math.abs(carC.rpm - expected) < 1, `régime affiché = régime tenu (${carC.rpm.toFixed(0)} vs ${expected.toFixed(0)})`);
-  assert.ok(carC.brake > 0, "lever de pied affiché dans le virage");
+  assert.equal(car.gear, gi + 1, "rapport affiché = rapport tenu");
+  assert.ok(Math.abs(car.rpm - expected) < 1, `régime affiché = régime tenu (${car.rpm.toFixed(0)} vs ${expected.toFixed(0)})`);
+  assert.ok(car.throttle >= 0 && car.throttle <= 1, `pédale d'accélérateur dans [0,1] (${car.throttle.toFixed(2)})`);
+  assert.ok(car.brake >= 0 && car.brake <= 1, `pédale de frein dans [0,1] (${car.brake.toFixed(2)})`);
 });
-
 test("usure → performance: wearFactor (rien sous 70%, -30% à 100%)", () => {
   assert.equal(wearFactor(0), 1);
   assert.equal(wearFactor(69.9), 1);
@@ -520,7 +508,15 @@ test("poussière: fatigue ×1,5, pas +1080/h", () => {
     channel: 5, enabled: true, conditions: [], action: { kind: "allure", level: "normale" },
     effect: { kind: "default" }, mode: "persistante",
   }];
+  // ÉCHAUFFEMENT (correctif trafic×dynamique): les voitures prennent leur
+  // vitesse d'équilibre AVANT le placement — posées à l'arrêt à 10 m, le
+  // leader "quasi immobile" passait pour un OBSTACLE contournable: le suiveur
+  // le doublait au départ ("suiveur dépasse lead", t=215 mesuré), les rôles
+  // s'inversaient et c'est le leader qui mangeait la poussière.
+  for (let i = 0; i < 60 * 30; i++) race.step(); // 1 min de roulage
   // le suiveur 10 m derrière: il reste dans la fenêtre de poussière (50 m)
+  // (à vitesse égale, le filtre "plus lent que moi" ne s'arme plus: le
+  // suiveur suit dans la poussière, les rôles sont stables)
   lead.positionKm = 10;
   sui.positionKm = 10 - 0.01;
   for (let i = 0; i < 10 * 60 * 30; i++) race.step(); // 10 minutes de course
@@ -529,4 +525,193 @@ test("poussière: fatigue ×1,5, pas +1080/h", () => {
   assert.ok(sui.fatigue > 0.7 && sui.fatigue < 5, `fatigue suiveur ${sui.fatigue.toFixed(2)} (attendu ≈1,4)`);
   assert.ok(sui.dustTick > 0, "le suiveur a été marqué dans la poussière");
   assert.ok(lead.fatigue < sui.fatigue, "le leader (sans poussière) fatigue moins");
+});
+
+// ========== PATCH 7: DYNAMIQUE LONGITUDINALE ==========
+// La vitesse est un ÉTAT intégré (F = m·a): plus de téléportation entre
+// équilibres, freinage ANTICIPÉ (le pilote voit 600 m devant), pédales réelles.
+// Mesures avant patch (banc 2-3 h): chute −145 km/h en 1 tick (−123 g) aux
+// changements de terrain, frein affiché 8,5 s d'affilée en virage, accélérateur
+// constant (70%) pendant 2 h.
+
+// 1. ACCÉLÉRATION: depuis l'arrêt, la voiture monte en vitesse PROGRESSIVEMENT
+//    (avant: elle partait instantanément à sa vitesse d'équilibre)
+test("dynamique: accélération progressive depuis l'arrêt (plus de téléportation)", () => {
+  const race = new Race({ seedText: "dyn-accel", targetHours: 3, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
+  race.addPlayer("pilote", "Pilote", "#111");
+  race.start();
+  const car = race.cars[0];
+  car.rules = [{ channel: 5, enabled: true, conditions: [], action: { kind: "allure", level: "normale" }, effect: { kind: "default" }, mode: "persistante" }];
+  let maxAcc = 0; // m/s²
+  let prev = car.speedKmh;
+  for (let i = 0; i < 30 * 30; i++) { // 30 s
+    race.step();
+    maxAcc = Math.max(maxAcc, (car.speedKmh - prev) / 3.6 / TICK_SECONDS);
+    prev = car.speedKmh;
+  }
+  assert.ok(car.speedKmh > 80, `la voiture dépasse 80 km/h en 30 s (${car.speedKmh.toFixed(0)} km/h)`);
+  assert.ok(maxAcc < 9, `accélération bornée par la physique (${maxAcc.toFixed(1)} m/s² < 9 — avant: +185 km/h en 1 tick)`);
+});
+
+// 2. FREINAGE ANTICIPÉ: le pilote voit le virage venir et freine AVANT,
+//    fort à l'abord puis en relâchant DANS le virage — jamais au-delà de la
+//    capacité physique (avant: frein à fond pendant tout le virage, et
+//    téléportation 187→42 km/h en 1 tick aux changements de terrain)
+test("dynamique: frein anticipé avant le virage, relâché dedans", () => {
+  const race = new Race({ seedText: "dyn-frein", targetHours: 3, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
+  race.addPlayer("pilote", "Pilote", "#111");
+  race.start();
+  const car = race.cars[0];
+  car.rules = [{ channel: 5, enabled: true, conditions: [], action: { kind: "allure", level: "normale" }, effect: { kind: "default" }, mode: "persistante" }];
+  // un virage FORT à APPROCHE DROITE (au-delà du km 2): on place la voiture à
+  // 170 km/h — si l'approche est courbée, l'accident émergent PRÉEXISTANT la
+  // tue avant le virage (mesuré: "casse chassis" à 6 ticks). Le candidat doit
+  // avoir 500→250 m d'approche droite et un virage serré.
+  let cornerKm = 0;
+  for (const p of race.world.points) {
+    if (p.km <= 2) continue;
+    const here = curvatureAt(race.world, p.km);
+    if (here < 0.5) continue; // pas un virage fort
+    let straight = true;
+    for (let d = 500; d >= 250; d -= 50) {
+      if (curvatureAt(race.world, p.km - d / 1000) > 0.15) { straight = false; break; }
+    }
+    if (straight) { cornerKm = p.km; break; }
+  }
+  assert.ok(cornerKm > 0, "le monde contient un virage fort à approche droite");
+  // place la voiture 500 m avant, à 170 km/h
+  car.positionKm = Math.max(0.6, cornerKm - 0.5);
+  car.speedKmh = 170;
+  const entryKm = car.positionKm + 0.5;
+  let vAt100m = 0, maxDec = 0, prev = 170, brakeInsideSum = 0, brakeInsideN = 0, brakedBefore = false;
+  for (let i = 0; i < 30 * 60; i++) { // 60 s max
+    race.step();
+    maxDec = Math.max(maxDec, (prev - car.speedKmh) / 3.6 / TICK_SECONDS);
+    prev = car.speedKmh;
+    const d = (entryKm - car.positionKm) * 1000; // mètres avant l'entrée
+    if (!vAt100m && Math.abs(d - 100) < 8) vAt100m = car.speedKmh;
+    if (d > 20 && car.brake > 0.4) brakedBefore = true;
+    if (d <= 0 && d > -60) { brakeInsideSum += car.brake; brakeInsideN++; }
+    if (car.positionKm > entryKm + 0.08) break;
+  }
+  assert.ok(brakedBefore, "freine AVANT le virage (anticipation 600 m)");
+  assert.ok(vAt100m > 0 && vAt100m < 150, `à 100 m de l'entrée la vitesse a déjà chuté (${vAt100m.toFixed(0)} km/h < 150)`);
+  assert.ok(maxDec < 12, `pas de téléportation (décél max ${maxDec.toFixed(1)} m/s² < 12 — avant: −1210 m/s²)`);
+  assert.ok(brakeInsideN > 0 && brakeInsideSum / brakeInsideN < 0.75, `frein relâché DANS le virage (moyenne ${(brakeInsideSum / brakeInsideN).toFixed(2)} < 0.75 — avant: 1.0 pendant tout le virage)`);
+});
+
+// 3. SURVITESSE → DÉRIVE (décision: l'accident se paie hors piste): entré trop
+//    vite, la voiture glisse vers l'EXTÉRIEUR; une roue peut sortir (l'adhérence
+//    chute) et la demande latérale alimente l'accident émergent existant
+test("dynamique: survitesse en virage → dérive extérieure + frein à fond", () => {
+  const race = new Race({ seedText: "dyn-drift", targetHours: 3, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
+  race.addPlayer("pilote", "Pilote", "#111");
+  race.start();
+  const car = race.cars[0];
+  car.rules = [{ channel: 5, enabled: true, conditions: [], action: { kind: "allure", level: "normale" }, effect: { kind: "default" }, mode: "persistante" }];
+  let best = 0, cornerKm = 0;
+  for (const p of race.world.points) {
+    if (p.km > 2 && Math.abs(p.curvature) > best) { best = Math.abs(p.curvature); cornerKm = p.km; }
+  }
+  // limite d'adhérence du virage, puis entrée à 1,6× (freinage raté)
+  const seg = segmentAt(race.world.segments, cornerKm);
+  const vLimKmh = cornerLimitAt(car, seg, "clair", 0, race.world, cornerKm) * 3.6;
+  assert.ok(vLimKmh > 30 && vLimKmh < 140, `limite du virage crédible (${vLimKmh.toFixed(0)} km/h)`);
+  car.positionKm = cornerKm;
+  car.speedKmh = vLimKmh * 1.6;
+  const lat0 = Math.abs(car.lateral);
+  let maxBrake = 0;
+  for (let i = 0; i < 20; i++) { // ~0,7 s dans le virage
+    race.step();
+    maxBrake = Math.max(maxBrake, car.brake);
+  }
+  assert.ok(Math.abs(car.lateral) > lat0 + 0.3, `la voiture dérive vers l'extérieur (|lat| ${lat0.toFixed(2)} → ${Math.abs(car.lateral).toFixed(2)} m)`);
+  assert.ok(maxBrake >= 0.9, `frein à fond exigé par la survitesse (${maxBrake.toFixed(2)})`);
+});
+
+// 4. FREINS USÉS → freinage réel dégradé (décision: l'usure des freins allonge
+//    les distances): à 100% d'usure la capacité de décélération chute de 30%
+test("dynamique: freins usés = décélération max plus faible", () => {
+  const mkRace = (): Race => {
+    const r = new Race({ seedText: "dyn-usure-freins", targetHours: 3, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
+    r.addPlayer("pilote", "Pilote", "#111");
+    r.start();
+    r.cars[0].rules = [{ channel: 5, enabled: true, conditions: [], action: { kind: "allure", level: "normale" }, effect: { kind: "default" }, mode: "persistante" }];
+    return r;
+  };
+  let cornerKm = 0;
+  {
+    // même critère que le test de freinage: virage fort à approche droite
+    const r = mkRace();
+    for (const p of r.world.points) {
+      if (p.km <= 2) continue;
+      if (curvatureAt(r.world, p.km) < 0.5) continue;
+      let straight = true;
+      for (let d = 500; d >= 250; d -= 50) {
+        if (curvatureAt(r.world, p.km - d / 1000) > 0.15) { straight = false; break; }
+      }
+      if (straight) { cornerKm = p.km; break; }
+    }
+  }
+  assert.ok(cornerKm > 0, "le monde contient un virage fort à approche droite");
+  const measure = (brakeWear: number): number => {
+    const r = mkRace();
+    const car = r.cars[0];
+    car.organs.freins = brakeWear;
+    car.positionKm = Math.max(0.6, cornerKm - 0.5);
+    car.speedKmh = 170;
+    let maxDec = 0, prev = 170;
+    for (let i = 0; i < 30 * 45; i++) { // 45 s max
+      r.step();
+      maxDec = Math.max(maxDec, (prev - car.speedKmh) / 3.6 / TICK_SECONDS);
+      prev = car.speedKmh;
+      if (car.positionKm > cornerKm + 0.05) break;
+    }
+    return maxDec;
+  };
+  const decNeuf = measure(0);
+  const decUse = measure(100);
+  assert.ok(decNeuf > 2, `le neuf freine fort (${decNeuf.toFixed(1)} m/s²)`);
+  assert.ok(decUse < decNeuf * 0.85, `freins à 100%: décélération max réduite (${decUse.toFixed(1)} vs ${decNeuf.toFixed(1)} m/s², attendu ≈ −30%)`);
+});
+
+// 5. TRAFIC × DYNAMIQUE (correctif tempête d'accrochages): avec l'état intégré,
+//    les facteurs de vitesse par tick (poussière ×0.9, bord sale ×0.5) se
+//    composaient sur l'état — effondrement exponentiel mesuré: voiture garée à
+//    3,4 km/h pendant 6 minutes en phase côte à côte collée, tirage
+//    d'accrochage à 900 m d'écart, 8/10 voitures mortes en 1 h de bench.
+//    Correctifs: facteurs = échelles de CIBLE, échappée de la phase côte à
+//    côte, accrochage seulement au contact, ré-engagement sur la vitesse
+//    demandée. Le rapide doit doubler le lent — proprement.
+test("trafic: le rapide double le lent, sans accrochage ni voiture garée", () => {
+  const race = new Race({ seedText: "traf-tempete", targetHours: 6, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
+  race.addPlayer("lent", "Lent", "#111");
+  race.addPlayer("rapide", "Rapide", "#222");
+  race.start();
+  const [lent, rapide] = race.cars;
+  lent.rules = [{ channel: 5, enabled: true, conditions: [], action: { kind: "allure", level: "lift_and_coast" }, effect: { kind: "default" }, mode: "persistante" }];
+  rapide.rules = [{ channel: 5, enabled: true, conditions: [], action: { kind: "allure", level: "normale" }, effect: { kind: "default" }, mode: "persistante" }];
+  // placement DÉTERMINISTE (l'ordre du départ est tiré au sort par le rng):
+  // le lent 1,2 km devant, les deux à 60 km/h — le rapide, dont l'équilibre
+  // est plus haut, rattrape et doit doubler proprement
+  lent.positionKm = 1.2; lent.speedKmh = 60;
+  rapide.positionKm = 0.0; rapide.speedKmh = 60;
+  // 15 min de course: rattrapage (~2-4 min), dépassement, détachement
+  let parkedTicks = 0; // ticks consécutifs "voiture garée": <15 km/h, déportée, censée rouler
+  let parkedMax = 0;
+  for (let i = 0; i < 15 * 60 * 30; i++) {
+    race.step();
+    for (const c of race.cars) {
+      const crawling = c.speedKmh > 0.5 && c.speedKmh < 15 && Math.abs(c.lateral) > 2
+        && !c.immobilized && !c.stopWork && c.sleeping <= 0;
+      parkedTicks = crawling ? parkedTicks + 1 : 0;
+      parkedMax = Math.max(parkedMax, parkedTicks);
+    }
+  }
+  const accrochages = race.events.filter((e) => e.text.includes("Accrochage")).length;
+  const depassements = race.events.filter((e) => e.text.includes("dépasse")).length;
+  assert.ok(depassements >= 1, `le rapide a bien doublé le lent (${depassements} dépassement(s))`);
+  assert.equal(accrochages, 0, `aucun accrochage (${accrochages} — avant correctif: tempête)`);
+  assert.ok(parkedMax < 60, `pas de voiture garée sur la piste (max ${parkedMax} ticks <15 km/h déportée, < 2 s)`);
+  assert.ok(rapide.positionKm > lent.positionKm + 0.1, `le rapide est détaché devant (+${((rapide.positionKm - lent.positionKm) * 1000).toFixed(0)} m)`);
 });
