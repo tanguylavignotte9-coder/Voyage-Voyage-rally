@@ -27,8 +27,10 @@ export interface GameVariables {
   retard_avance: number;
   distance_rival_devant: number;
   distance_rival_derriere: number;
+  distance_prochain_front: number;
   biome: string;
   typologie_terrain: string;
+  meteo_devant: string;
 }
 
 export function evaluateCondition(cond: RuleCondition, vars: GameVariables): boolean {

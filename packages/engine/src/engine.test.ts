@@ -3,9 +3,9 @@ import assert from "node:assert";
 import { generateWorld, roadAhead } from "./world";
 import { Rng, seedFromString } from "./rng";
 import { Race, PRIME_HOUR } from "./race";
-import { darknessFactor, computeSpeed, applyTrafficEffects, resolveContactFault, SimContext, TICK_SECONDS } from "./sim";
-import { CAR_LEN_M, GEAR_RATIOS, GEAR_FINAL_DRIVE, WHEEL_RADIUS_M, ENGINE_IDLE_RPM, ENGINE_REDLINE_RPM } from "./calibration";
-import { CarState, DEFAULT_RULES, TICKS_PER_HOUR } from "./types";
+import { darknessFactor, computeSpeed, applyTrafficEffects, resolveContactFault, SimContext, TICK_SECONDS, buildVariables } from "./sim";
+import { CAR_LEN_M, GEAR_RATIOS, GEAR_FINAL_DRIVE, WHEEL_RADIUS_M, ENGINE_IDLE_RPM, ENGINE_REDLINE_RPM, wearFactor } from "./calibration";
+import { CarState, DEFAULT_RULES, TICKS_PER_HOUR, OrganId, TerrainSegment } from "./types";
 
 test("déterminisme: même graine = même monde", () => {
   const w1 = generateWorld({ seed: 42, targetHours: 10 });
@@ -379,6 +379,92 @@ test("hud moteur: régime et rapport suivent la vitesse réellement tenue", () =
   assert.equal(carC.gear, gi + 1, "rapport affiché = rapport tenu");
   assert.ok(Math.abs(carC.rpm - expected) < 1, `régime affiché = régime tenu (${carC.rpm.toFixed(0)} vs ${expected.toFixed(0)})`);
   assert.ok(carC.brake > 0, "lever de pied affiché dans le virage");
+});
+
+test("usure → performance: wearFactor (rien sous 70%, -30% à 100%)", () => {
+  assert.equal(wearFactor(0), 1);
+  assert.equal(wearFactor(69.9), 1);
+  assert.equal(wearFactor(70), 1, "seuil exact: encore aucun effet");
+  assert.ok(Math.abs(wearFactor(85) - (1 - 0.30 * 15 / 30)) < 1e-9, "85%: -15%");
+  assert.ok(Math.abs(wearFactor(100) - 0.70) < 1e-9, "malus max -30% à 100% (décision: linéaire après 70%)");
+});
+
+test("usure → performance: une voiture usée roule plus lentement", () => {
+  const seg: TerrainSegment = { km: 0, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "large" };
+  const neuf = mkCar("soutenue");
+  const vNeuf = computeSpeed(neuf, seg, "clair", 0);
+  const usee = mkCar("soutenue");
+  for (const o of ["moteur", "transmission", "pneus_av", "pneus_ar", "freins", "suspensions"] as OrganId[]) usee.organs[o] = 50;
+  assert.ok(Math.abs(computeSpeed(usee, seg, "clair", 0) - vNeuf) < 0.5, "usure 50% sur tout: AUCUNE dégradation");
+  for (const o of ["moteur", "transmission", "pneus_av", "pneus_ar", "freins", "suspensions"] as OrganId[]) usee.organs[o] = 100;
+  const vMorte = computeSpeed(usee, seg, "clair", 0);
+  // avant ce patch: moteur 95% roulait à 190,2 km/h identique au neuf.
+  // Sur LIGNE DROITE RAPIDE le malus puissance -30% donne ~-15% de vitesse
+  // top (l'aéro en v² amortit) — mesuré: 172,4 vs 202,7. En virage et sur
+  // terrain dur, adhérence/roulement dégradés pèsent bien davantage.
+  assert.ok(vMorte < vNeuf * 0.88, `tout usé à 100%: ${vMorte.toFixed(1)} vs ${vNeuf.toFixed(1)} km/h`);
+  assert.ok(vMorte > vNeuf * 0.4, "dégradée mais pas morte (la casse immobilise, l'usure ralentit)");
+});
+
+test("usure → performance: refroidissement usé + canicule = puissance en berne", () => {
+  const seg: TerrainSegment = { km: 0, biome: "desert", terrain: "piste_rapide", altitude: 0, slope: 0, width: "large" };
+  const saine = mkCar("soutenue");
+  const mauvaise = mkCar("soutenue");
+  mauvaise.organs.refroidissement = 100;
+  // sous temps clair, le refroidissement n'a pas d'effet
+  assert.ok(Math.abs(computeSpeed(mauvaise, seg, "clair", 0) - computeSpeed(saine, seg, "clair", 0)) < 0.5, "clair: aucun effet");
+  // sous canicule, il pèse
+  const vSaine = computeSpeed(saine, seg, "canicule", 0);
+  const vMauvaise = computeSpeed(mauvaise, seg, "canicule", 0);
+  assert.ok(vMauvaise < vSaine * 0.95, `canicule: refroidissement mort ${vMauvaise.toFixed(1)} vs ${vSaine.toFixed(1)} km/h`);
+});
+
+test("météo: l'effet PUISSANCE de la tempête atteint la route (powerEff était du code mort)", () => {
+  const seg: TerrainSegment = { km: 0, biome: "steppe", terrain: "piste_rapide", altitude: 0, slope: 0, width: "large" };
+  const car = mkCar("soutenue");
+  const vClair = computeSpeed(car, seg, "clair", 0);
+  const vTempete = computeSpeed(car, seg, "tempete_sable", 0);
+  // avant: WEATHER_POWER_EFFECT alimentait powerEff, variable jamais lue
+  assert.ok(vTempete < vClair * 0.95, `tempête: ${vTempete.toFixed(1)} vs ${vClair.toFixed(1)} km/h`);
+});
+
+test("météo vivante: les fronts se déplacent le long de la route", () => {
+  const race = new Race({ seedText: "meteo", targetHours: 5, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
+  const mobiles = race.fronts.filter((f) => f.speedKmPerTick !== 0);
+  assert.ok(mobiles.length > 0, "au moins un front mobile généré (±5-40 km/h)");
+  const f0 = mobiles[0];
+  const km0 = f0.km;
+  const nTicks = TICKS_PER_HOUR / 2; // 30 minutes simulées
+  const drift = f0.speedKmPerTick * nTicks;
+  race.addPlayer("a", "Alice", "#111");
+  race.start();
+  for (let i = 0; i < nTicks; i++) race.step();
+  let d = f0.km - km0;
+  const total = race.world.totalKm;
+  if (d < -total / 2) d += total; else if (d > total / 2) d -= total; // wrap
+  assert.ok(Math.abs(d - drift) < 0.5, `le front a bougé de ${d.toFixed(2)} km (attendu ${drift.toFixed(2)})`);
+});
+
+test("météo vivante: distance_prochain_front et meteo_devant exposés aux règles", () => {
+  const race = new Race({ seedText: "front", targetHours: 5, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
+  race.addPlayer("a", "Alice", "#111");
+  race.start();
+  const car = race.cars[0];
+  // fronts synthétiques: la course n'a pas encore roulé, on remplace les fronts réels
+  race.fronts.length = 0;
+  race.fronts.push({ id: 9999, kind: "tempete_sable", km: car.positionKm + 100, speedKmPerTick: 0, radiusKm: 20, startTick: 0, endTick: 10 * TICKS_PER_HOUR });
+  race.fronts.push({ id: 9998, kind: "pluie_diluvienne", km: car.positionKm + 500, speedKmPerTick: 0, radiusKm: 30, startTick: 0, endTick: 10 * TICKS_PER_HOUR });
+  race.fronts.push({ id: 9997, kind: "piste_endommagee" as any, km: car.positionKm + 30, speedKmPerTick: 0, radiusKm: 2, startTick: 0, endTick: 10 * TICKS_PER_HOUR });
+  const vars = buildVariables(car, race.ctxFor());
+  assert.ok(Math.abs(vars.distance_prochain_front - 80) < 0.5, `distance au front = ${vars.distance_prochain_front} (attendu 80 = bord d'entrée 100 - rayon 20)`);
+  assert.equal(vars.meteo_devant, "tempete_sable", "le type du front le plus proche est exposé");
+  assert.equal(vars.meteo_active, false, "hors du front: meteo_active fausse");
+  // la piste endommagée à +28 km (bord) n'est PAS comptée comme front météo
+  // une fois le premier front passé derrière, le suivant prend le relais
+  car.positionKm += 85;
+  const vars2 = buildVariables(car, race.ctxFor());
+  assert.ok(Math.abs(vars2.distance_prochain_front - 385) < 1, `front derrière → suivant à ${vars2.distance_prochain_front} (attendu 385)`);
+  assert.equal(vars2.meteo_devant, "pluie_diluvienne");
 });
 
 // ========== UNITÉ DE TEMPS: le moteur tourne à 30 ticks/s, pas 1 ==========

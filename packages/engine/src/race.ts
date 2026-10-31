@@ -163,6 +163,15 @@ export class Race {
       if ((this.tick - this.raceStartTick) / TICKS_PER_SECOND < car.offsetSeconds) continue;
       tickCar(car, ctx);
     }
+    // MÉTÉO VIVANTE: les fronts avancent le long de la route (speedKmPerTick
+    // en km/tick, ±5-40 km/h). Wrap aux extrémités de l'itinéraire: un front
+    // qui sortit d'un côté ressort de l'autre — déterministe, pas de disparition.
+    for (const f of this.fronts) {
+      if (f.speedKmPerTick === 0) continue; // pistes endommagées = terrain fixe
+      f.km += f.speedKmPerTick;
+      if (f.km < 0) f.km += this.world.totalKm;
+      else if (f.km > this.world.totalKm) f.km -= this.world.totalKm;
+    }
     this.tickDaily();
     this.tickTowing();
     this.checkFinish();

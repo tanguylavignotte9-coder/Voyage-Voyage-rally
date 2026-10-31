@@ -669,23 +669,38 @@ export function generateWeatherFronts(world: World, rng: Rng, ticksPerHour: numb
   const fronts: WeatherFront[] = [];
   let id = 1;
   const totalTicks = (world.totalKm / 50) * ticksPerHour;
-  for (let t = 0; t < totalTicks; t += rng.int(ticksPerHour, ticksPerHour * 4)) {
+  // MÉTÉO VIVANTE (décision mesurée): les fronts BOUGENT le long de la route
+  // (±5-40 km/h, appliqué dans race.step()), chaque biome a sa SIGNATURE
+  // (désert = tempêtes de sable/canicule, montagne = froid/grêle, steppe =
+  // vent/pluie, humide = pluie/brouillard), et la densité vise ~10-20% de
+  // présence mesurée au banc (l'ancien réglage — intervalle 1-4 h, vie 1-4 h,
+  // ±72 km/h jamais appliqués — donnait 2,3% de présence mesurée: la météo
+  // était quasi morte).
+  const SIG_WEIGHTS: Record<string, [WeatherFront["kind"], number][]> = {
+    desert: [["tempete_sable", 0.45], ["canicule", 0.25], ["vent_fort", 0.2], ["brouillard", 0.1]],
+    montagne: [["froid_intense", 0.3], ["grele", 0.25], ["pluie_diluvienne", 0.2], ["vent_fort", 0.15], ["brouillard", 0.1]],
+    steppe: [["vent_fort", 0.35], ["pluie_diluvienne", 0.3], ["brouillard", 0.2], ["canicule", 0.15]],
+    humide: [["pluie_diluvienne", 0.45], ["brouillard", 0.3], ["vent_fort", 0.15], ["froid_intense", 0.1]],
+  };
+  // densité calibrée au banc: la route fait ~8400 km, le peloton n'en parcourt
+  // que ~1200 en 12 h — pour ~10-15% de présence mesurée il faut ~7-13 fronts
+  // ACTIFS en permanence (mesuré avant recâblage: ~2% avec 30-120 min d'intervalle,
+  // les fronts étaient dilués sur toute la route)
+  for (let t = 0; t < totalTicks; t += rng.int(ticksPerHour / 5, ticksPerHour / 2)) {
     const km = rng.range(0, world.totalKm);
     const biome = segmentAt(world.segments, km).biome;
-    const kinds: Record<string, WeatherFront["kind"][]> = {
-      desert: ["tempete_sable", "canicule", "vent_fort", "brouillard"],
-      montagne: ["froid_intense", "grele", "pluie_diluvienne", "vent_fort", "brouillard"],
-      steppe: ["pluie_diluvienne", "vent_fort", "canicule", "brouillard", "grele"],
-      humide: ["pluie_diluvienne", "brouillard", "froid_intense", "vent_fort"],
-    };
+    const sig = SIG_WEIGHTS[biome] ?? SIG_WEIGHTS.steppe;
+    const total = sig.reduce((s, e) => s + e[1], 0);
+    let roll = rng.next() * total; let kind = sig[0][0];
+    for (const [k, w] of sig) { roll -= w; if (roll <= 0) { kind = k; break; } }
     fronts.push({
       id: id++,
-      kind: rng.pick(kinds[biome] ?? ["pluie_diluvienne", "vent_fort"]),
+      kind,
       km,
-      speedKmPerTick: rng.range(-0.02, 0.02) / 30,
+      speedKmPerTick: (rng.range(5, 40) * (rng.chance(0.5) ? -1 : 1)) / ticksPerHour,
       radiusKm: rng.range(30, 100),
       startTick: t,
-      endTick: t + rng.int(ticksPerHour, ticksPerHour * 4),
+      endTick: t + rng.int(ticksPerHour * 2, ticksPerHour * 6),
     });
   }
   const damaged: WeatherFront[] = [];

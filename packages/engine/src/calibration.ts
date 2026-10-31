@@ -131,6 +131,28 @@ export const ORGAN_MODELS: Record<string, OrganLoadModel> = {
   refroidissement: { nominalLoadN: 8500, expo: 2.5, damagePerHourAtNominal: 0.12 },
 };
 
+// ========== USURE → PERFORMANCE (décision mesurée, calibrée au banc) ==========
+// Un organe usé dégrade la voiture: AUCUN effet sous WEAR_PERF_START (70%),
+// puis dégradation LINÉAIRE jusqu'à WEAR_PERF_MAX_MALUS (-30%) à 100%. La
+// casse (échec de charge, ci-dessus) reste la vraie punition; la lenteur est
+// le signal stratégique "répare avant que ça casse". Mesuré avant ce patch:
+// un moteur à 95% d'usure roulait à 190,2 km/h IDENTIQUE au neuf, et un
+// moteur "cassé" (100%) remorqué par le camion roulait toujours à 190 —
+// l'usure n'existait pas dans la boucle de décision du joueur.
+export const WEAR_PERF_START = 70;        // % d'usure à partir duquel l'organe dégrade
+export const WEAR_PERF_MAX_MALUS = 0.30;  // malus max à 100% d'usure
+export function wearFactor(wear: number): number {
+  if (wear <= WEAR_PERF_START) return 1;
+  return 1 - WEAR_PERF_MAX_MALUS * (Math.min(100, wear) - WEAR_PERF_START) / (100 - WEAR_PERF_START);
+}
+// Mapping organe → dimension (implémenté dans sim.ts computeSpeed):
+//   moteur + transmission → puissance (moyenne des deux facteurs)
+//   pneus_av + pneus_ar    → adhérence (virage, motricité, accidents émergents)
+//   freins                 → vitesse en virage (lever de pied moins efficace)
+//   suspensions            → résistance au roulement (la caisse tape)
+//   refroidissement        → puissance par canicule/tempête de sable
+//   chassis                → structurel: pas d'effet vitesse, il casse (accident)
+
 // PANNE = ÉCHEC DE CHARGE: quand la contrainte dépasse la RÉSISTANCE RÉSIDUELLE
 // de l'organe (usure + aléa matérielle), il cède. Plus d'échelle 80%: un organe
 // à 40% usé soumis à une contrainte énorme (réception de saut à 200 km/h)

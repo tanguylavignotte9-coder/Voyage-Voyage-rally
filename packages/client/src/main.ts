@@ -366,14 +366,16 @@ function actionText(a: any): string {
 
 // ===== Éditeur complet =====
 const BOOL_VARS = ["crevaison", "immobilisation", "nuit", "en_station", "bivouac_en_cours", "meteo_active", "depassement_en_cours"];
-const NUM_VARS = ["carburant", "fatigue", "organe_critique", "vitesse", "km_parcourus", "distance_prochaine_station", "heure", "jour_de_course", "distance_rival_devant", "distance_rival_derriere"];
+const NUM_VARS = ["carburant", "fatigue", "organe_critique", "vitesse", "km_parcourus", "distance_prochaine_station", "distance_prochain_front", "heure", "jour_de_course", "distance_rival_devant", "distance_rival_derriere"];
 const CAT_VARS: Record<string, string[]> = {
   biome: ["desert", "montagne", "steppe", "humide"],
   typologie_terrain: ["piste_rapide", "piste_moyenne", "piste_mauvaise", "dunes", "regs", "pierrier", "col", "bourbier", "marécage"],
+  meteo_devant: ["tempete_sable", "canicule", "vent_fort", "brouillard", "pluie_diluvienne", "grele", "froid_intense", "clair"],
 };
 const NUM_VARS_LABELS: Record<string, string> = {
   carburant: "Carburant (% réservoir)", fatigue: "Fatigue (0-100)", organe_critique: "Organes au seuil critique",
   vitesse: "Vitesse (km/h)", km_parcourus: "Km parcourus", distance_prochaine_station: "Distance prochaine station (km)",
+  distance_prochain_front: "Distance prochain front météo (km)",
   heure: "Heure (0-24)", jour_de_course: "Jour de course", distance_rival_devant: "Distance rival devant (km)",
   distance_rival_derriere: "Distance rival derrière (km)",
 };

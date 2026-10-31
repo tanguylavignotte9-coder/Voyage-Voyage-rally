@@ -6,7 +6,7 @@ import {
   RISK_SPEED_BONUS,
   FATIGUE_PER_HOUR, FATIGUE_NIGHT_FACTOR, FATIGUE_WEATHER_FACTOR, slopeConsumptionFactor,
   FATIGUE_RECOVERY_BIVOUC_PER_HOUR, FATIGUE_RECOVERY_HOTEL_PER_HOUR,
-  ORGAN_MODELS, STRENGTH_SCATTER, WEATHER_STRESS, RISK_ACCIDENT_FACTOR,
+  ORGAN_MODELS, STRENGTH_SCATTER, WEATHER_STRESS, RISK_ACCIDENT_FACTOR, wearFactor,
   AERO_HALF, CONVERGENCE_DAMPING, CONVERGENCE_EPS, CONVERGENCE_EFF, CONVERGENCE_V_MIN, FUEL_TIME_H_PER_L,
   ENGINE_IDLE_RPM, ENGINE_REDLINE_RPM, ENGINE_MAX_TORQUE_NM, GEAR_RATIOS, GEAR_FINAL_DRIVE,
   WHEEL_RADIUS_M, torqueCurve,
@@ -74,22 +74,25 @@ export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string
   const daring = (DARING_BY_RISK as Record<string, number>)[car.risk] ?? 0.88;
   const vTurn = radius === Infinity ? Infinity : Math.sqrt(mu * g * Math.max(20, radius)) * daring;
 
-  // conditions dégradantes (météo/nuit/fatigue/crevaison): agissent sur
+  // conditions dégradantes (météo/nuit/fatigue/crevaison/USURE): agissent sur
   // l'ADHÉRENCE et la PUISSANCE — des effets physiques, pas des caps de vitesse
-  let muEff = mu;
-  let powerEff = powerW;
+  // USURE → PERFORMANCE: pneus usés = adhérence en berne (moyenne av/ar, -30%
+  // max à 100%: la voiture glisse et motrice moins). NB: l'ancien powerEff
+  // (effet PUISSANCE de la météo) était calculé mais JAMAIS utilisé — code
+  // mort; l'effet est désormais branché dans throttleShare ci-dessous.
+  const tireWear = (wearFactor(car.organs.pneus_av) + wearFactor(car.organs.pneus_ar)) / 2;
+  let muEff = mu * tireWear;
   muEff *= WEATHER_GRIP_EFFECT[weather] ?? 1.0;
-  powerEff *= WEATHER_POWER_EFFECT[weather] ?? 1.0;
-  // la nuit / la fatigue: on ne voit pas loin — on lève le pied même en ligne
-  // droite ET on réduit l'audace en virage (comportement de pilote réel)
-  powerEff *= 1 - darkness * NIGHT_POWER_LOSS;
-  if (car.fatigue > FATIGUE_POWER_START) powerEff *= 1 - ((car.fatigue - FATIGUE_POWER_START) / 100) * FATIGUE_POWER_RATE;
   // la nuit on ne voit pas: on limite l'adhérence exploitée (audace)
   const daringEff = daring * (1 - darkness * NIGHT_AUDACITY_LOSS) * (car.fatigue > FATIGUE_POWER_START ? 1 - ((car.fatigue - FATIGUE_POWER_START) / 100) * FATIGUE_AUDACITY_RATE : 1);
-  const vTurnEff = radius === Infinity ? Infinity : Math.sqrt(muEff * g * Math.max(20, radius)) * daringEff;
+  // freins usés: le lever de pied en approche de virage est moins efficace
+  // (distances de freinage allongées — même adhérence, moins de ralentissement exploitable)
+  const vTurnEff = radius === Infinity ? Infinity : Math.sqrt(muEff * g * Math.max(20, radius)) * daringEff * wearFactor(car.organs.freins);
   if (car.crevaison) { /* roulage dégradé: roulement doublé */ }
 
-  const crEff = car.crevaison ? cr * 2.2 : cr;
+  // suspensions usées: le train roulant encaisse mal, la caisse tape — la
+  // résistance au roulement grimpe (jusqu'à +30% à 100% d'usure)
+  const crEff = (car.crevaison ? cr * 2.2 : cr) * (1 + (1 - wearFactor(car.organs.suspensions)));
   const rollingF = crEff * mass * g;
   const slopeF = slopeFrac * mass * g; // positif = côte (oppose), négatif = descente (aide)
   const kAero = AERO_HALF * AIR_DENSITY * AERO_DRAG_COEFF;
@@ -119,8 +122,16 @@ export function computeSpeed(car: CarState, seg: TerrainSegment, weather: string
   const nightThrottle = 1 - darkness * NIGHT_POWER_LOSS;
   const fatigueThrottle = car.fatigue > FATIGUE_POWER_START
     ? 1 - ((car.fatigue - FATIGUE_POWER_START) / 100) * FATIGUE_POWER_RATE : 1;
+  // USURE → PUISSANCE: moteur + transmission dégradent l'accélérateur (moyenne
+  // des deux, -30% max à 100%); le refroidissement usé ne pardonne pas la
+  // canicule/tempête de sable. Et la MÉTÉO pèse enfin sur la puissance: avant
+  // ce patch, WEATHER_POWER_EFFECT alimentait powerEff, une variable morte —
+  // l'effet puissance de la météo n'atteignait jamais la route.
+  const powerWear = (wearFactor(car.organs.moteur) + wearFactor(car.organs.transmission)) / 2;
+  const coolingWear = (weather === "canicule" || weather === "tempete_sable") ? wearFactor(car.organs.refroidissement) : 1;
   const throttleShare = (PACE_SPEED_FACTOR[car.pace] ?? 0.7) * (RISK_SPEED_BONUS[car.risk] ?? 1.0)
-    * eff.power * altLoss2 * nightThrottle * fatigueThrottle;
+    * eff.power * altLoss2 * nightThrottle * fatigueThrottle
+    * (WEATHER_POWER_EFFECT[weather] ?? 1.0) * powerWear * coolingWear;
   // itération de résolution: le couple de boîte alimente l'équilibre des forces
   let v = 20;
   for (let i = 0; i < 14; i++) {
@@ -173,6 +184,16 @@ export function buildVariables(car: CarState, ctx: SimContext): GameVariables {
   const next = nextStation(ctx.world.stations, car.positionKm);
   const weather = weatherAt(ctx.fronts, ctx.tick, car.positionKm);
   const criticalCount = Object.values(car.organs).filter((w) => w >= 80).length;
+  // MÉTÉO VIVANTE: front actif ou à venir le plus proche DEVANT (bord d'entrée,
+  // km - rayon). Sert aux règles "si tempête à < X km → ralentir". Les pistes
+  // endommagées sont du terrain, pas des fronts météo — on les ignore.
+  let frontDist = 9999; let frontKind = "clair";
+  for (const f of ctx.fronts) {
+    if (f.kind === "piste_endommagee") continue;
+    if (ctx.tick > f.endTick) continue;
+    const d = f.km - f.radiusKm - car.positionKm;
+    if (d >= 0 && d < frontDist) { frontDist = d; frontKind = f.kind; }
+  }
   const hour = ctx.hourOfDay(ctx.tick);
   const rivals = ctx.allCars.filter((c) => c.playerId !== car.playerId && !c.arrived && !c.forfait);
   let frontGap = Infinity;
@@ -189,6 +210,8 @@ export function buildVariables(car: CarState, ctx: SimContext): GameVariables {
     en_station: car.stopped && !car.immobilized && car.sleeping <= 0,
     bivouac_en_cours: car.sleeping > 0,
     meteo_active: weather !== "clair",
+    distance_prochain_front: frontDist,
+    meteo_devant: frontKind,
     depassement_en_cours: false,
     carburant: (car.fuel / car.fuelCapacity) * 100,
     fatigue: car.fatigue,
@@ -844,7 +867,10 @@ function probabilisticFailure(car: CarState, ctx: SimContext, emit: (t: string) 
   const mu = LATERAL_GRIP[seg.terrain] ?? 0.5;
   // adhérence effective: fatigue (vigilance) + nuit + météo la dégradent — CONTINU
   const vigueur = 1 - car.fatigue * VIGOR_LOSS_PER_FATIGUE;
-  const muEff = mu * vigueur * (1 - darkness * OVERTAKE_NIGHT_GRIP_LOSS) * (weather === "pluie_diluvienne" || weather === "tempete_sable" ? RAIN_GRIP_FACTOR : 1);
+  // pneus usés: l'accident émergent devient plus probable (l'adhérence RÉELLE
+  // est dégradée par l'usure, pas seulement par météo/nuit/fatigue)
+  const tireWearAcc = (wearFactor(car.organs.pneus_av) + wearFactor(car.organs.pneus_ar)) / 2;
+  const muEff = mu * vigueur * tireWearAcc * (1 - darkness * OVERTAKE_NIGHT_GRIP_LOSS) * (weather === "pluie_diluvienne" || weather === "tempete_sable" ? RAIN_GRIP_FACTOR : 1);
   const vMs = car.speedKmh / 3.6;
   // demande latérale vs capacité: l'excès est le moteur de l'accident
   if (radius !== Infinity && car.speedKmh > 3) {
