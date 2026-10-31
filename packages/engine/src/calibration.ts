@@ -6,11 +6,11 @@
 // des forces à chaque tick. P_traCTION disponible = P_max × allure × risque;
 // forces opposées: roulement (terrain), traînée aéro (∝ v²), gravité (pente),
 // tenue de route (virage). On résout P/v = ΣF (itération rapide).
-export const CAR_MASS_KG = 1900;
+export const CAR_MASS_KG = 1500;
 export const CAR_POWER_W = 246000;          // 330 ch — une vraie préparation raid
 export const TRANSMISSION_EFF = 0.62;       // rendement roue: boîte+pont+pertes
 export const ALTITUDE_POWER_LOSS = 0.13;    // la puissance chute avec l altitude (air raréfié)
-export const AERO_DRAG_COEFF = 0.85;        // Cx × S d'un SUV
+export const AERO_DRAG_COEFF = 0.45;        // Cx × S d'un SUV
 export const AIR_DENSITY = 1.2;
 // coefficient de roulement par terrain (Cr — le "grip/roughness" réel)
 export const ROLLING_RES: Record<string, number> = {
@@ -300,7 +300,7 @@ export const CURVE_REF_RADIUS_M = 90;      // rayon de référence de la courbur
 export const CURVE_MIN_NORMALIZED = 0.001;  // en dessous: considéré droit
 export const TOWING_SPEED_FACTOR = 0.65;   // on tire une autre auto
 export const FUEL_DENSITY_KG_PER_L = 0.8;  // masse de l'essence
-export const WHEEL_DRIVE_EFF = 0.9;        // 4 roues motrices: efficacité de la motricité
+export const WHEEL_DRIVE_EFF = 0.7;        // 4 roues motrices: efficacité de la motricité
 export const GRAVITY = 9.81;
 
 // ========== INTERACTIONS TRAFIC ==========
@@ -344,7 +344,14 @@ export const BRAKE_CONFIDENCE: Record<string, number> = {
 };
 export const OFF_TRACK_GRIP = 0.6;      // adhérence herbe/terre quand une roue sort de piste
 export const DRIFT_OUT_MAX_M = 0.65;    // dérive max hors piste (une roue dehors, pas la voiture)
-export const PARKED_BRAKE = 1;          // pédale de frein affichée à l'arrêt (frein de parking)
+export const PARKED_BRAKE = 1;
+
+// (patch 8) HYSTÉRÉSIS DE CIBLE: bande morte (m/s) autour de la cible de
+// vitesse. Le pilote garde son mode (freiner/tenir/accélérer) tant que
+// l'écart v-cible reste dans la bande — un humain ne pilote pas à 30 Hz.
+// Mesuré avant: jusqu'à 7 inversions accélérateur/frein PAR SECONDE en
+// virage (126 inversions en 20 min, dont 111 en virage). ~1.75 m/s ≈ 6 km/h.
+export const PEDAL_HYST_BAND_MS = 1.75;          // pédale de frein affichée à l'arrêt (frein de parking)
 export const OVERTAKE_APPROACH_DECEL = 2.5; // décélération planifiée d'approche d'un rival (m/s²): v = sqrt(vCible² + 2·a·d), le pilote arrive déjà ralenti
 export const ALONGSIDE_OVERLAP_M = 8;          // |écart| < 8 m => chevauchement (côte à côte)
 export const SIDE_CLEARANCE_M = 0.5;           // marge latérale minimale côte à côte
@@ -440,8 +447,8 @@ export const CONVERGENCE_V_MIN = 0.5;  // plancher de vitesse de l'itération (m
 export const ENGINE_IDLE_RPM = 900;
 export const ENGINE_OPTIMAL_RPM = 3200;    // pic de couple
 export const ENGINE_REDLINE_RPM = 5200;
-export const ENGINE_MAX_TORQUE_NM = 520;   // couple moteur au pic (N·m)
-export const GEAR_RATIOS = [4.2, 2.6, 1.8, 1.35, 1.05, 0.85]; // 1re..6e (boîte+pont)
+export const ENGINE_MAX_TORQUE_NM = 550;   // couple moteur au pic (N·m)
+export const GEAR_RATIOS = [4.2, 2.6, 1.8, 1.35, 1.05, 0.83]; // 1re..6e (boîte+pont)
 export const GEAR_FINAL_DRIVE = 3.9;       // renvoi différentiel
 export const WHEEL_RADIUS_M = 0.42;        // roue de raid 35"
 export const ENGINE_INERTIA_FACTOR = 0.04; // inertie de rotation (masse équivalente)

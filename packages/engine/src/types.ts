@@ -228,6 +228,7 @@ export interface CarState {
   rpm: number;    // régime moteur (tr/min)
   throttle: number; // 0..1 accélérateur
   brake: number;    // 0..1 frein
+  driveMode: "accel" | "hold" | "brake"; // (patch 8) mode pilote persistant (hystérésis de cible)
   dailyKm: number;
   dayStartTick: number;
   dailyMaxSpeed: number;

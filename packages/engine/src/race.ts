@@ -108,6 +108,7 @@ export class Race {
       rpm: 900,
       throttle: 0,
       brake: 0,
+      driveMode: "hold",
       dailyKm: 0,
       dayStartTick: 0,
       dailyMaxSpeed: 0,

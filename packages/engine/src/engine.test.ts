@@ -39,7 +39,7 @@ function mkCar(pace: any = "normale"): CarState {
     stopWork: null, overtaking: "prudent", defending: false, offsetSeconds: 0, lateral: 0, maneuver: null, noPassUntilTick: 0, dustTick: 0, dailyKm: 0, dayStartTick: 0,
     dailyMaxSpeed: 0, mentalLog: [], towedBy: null, transactions: [],
     stats: { distance: 0, maxSpeed: 0, pannes: 0, depenses: 0, primes: 0, accidents: 0, depassements: 0 },
-    gear: 1, rpm: 900, throttle: 0, brake: 0,
+    gear: 1, rpm: 900, throttle: 0, brake: 0, driveMode: "hold",
   };
 }
 
@@ -388,9 +388,13 @@ test("usure → performance: une voiture usée roule plus lentement", () => {
   const vMorte = computeSpeed(usee, seg, "clair", 0);
   // avant ce patch: moteur 95% roulait à 190,2 km/h identique au neuf.
   // Sur LIGNE DROITE RAPIDE le malus puissance -30% donne ~-15% de vitesse
-  // top (l'aéro en v² amortit) — mesuré: 172,4 vs 202,7. En virage et sur
-  // terrain dur, adhérence/roulement dégradés pèsent bien davantage.
-  assert.ok(vMorte < vNeuf * 0.88, `tout usé à 100%: ${vMorte.toFixed(1)} vs ${vNeuf.toFixed(1)} km/h`);
+  // top (l'aéro en v² amortit) — mesuré à l'époque: 172,4 vs 202,7 (0.85).
+  // (patch 8) moteur musclé proche du limiteur en 6e: la compression vitesse
+  // est plus forte (v ∝ P^1/3 en régime aéro, plafond 6e encore plus proche)
+  // — mesuré: 217,3 vs 238,6 (0.91). Le seuil suit la physique, l'usure
+  // ralentit toujours clairement; en virage et sur terrain dur, adhérence
+  // et roulement dégradés pèsent bien davantage.
+  assert.ok(vMorte < vNeuf * 0.93, `tout usé à 100%: ${vMorte.toFixed(1)} vs ${vNeuf.toFixed(1)} km/h`);
   assert.ok(vMorte > vNeuf * 0.4, "dégradée mais pas morte (la casse immobilise, l'usure ralentit)");
 });
 
@@ -714,4 +718,63 @@ test("trafic: le rapide double le lent, sans accrochage ni voiture garée", () =
   assert.equal(accrochages, 0, `aucun accrochage (${accrochages} — avant correctif: tempête)`);
   assert.ok(parkedMax < 60, `pas de voiture garée sur la piste (max ${parkedMax} ticks <15 km/h déportée, < 2 s)`);
   assert.ok(rapide.positionKm > lent.positionKm + 0.1, `le rapide est détaché devant (+${((rapide.positionKm - lent.positionKm) * 1000).toFixed(0)} m)`);
+});
+
+// ===== (patch 8) PERFORMANCE: 0-100 ≈ 7 s, 0-200 ≈ 30 s, pointe ≈ 250 =====
+// banc plat (curvatures 0, terrain piste_rapide partout), allure attaque +
+// risque haut: mesures du banc — 7,43 s / 27,57 s / 246,8 km/h. Les seuils
+// gardent de la marge (8,5 s / 240) pour absorber les petites dérives de
+// calibration sans laisser repasser la voiture anémique d'avant (9,3 s /
+// 214 km/h à 1900 kg + 520 N·m).
+test("performance: 0-100 ≈ 7 s, pointe ≈ 250 km/h (banc plat, attaque)", () => {
+  const race = new Race({ seedText: "perf-banc", targetHours: 3, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
+  race.addPlayer("pilote", "Pilote", "#111");
+  race.start();
+  const car = race.cars[0];
+  race.fronts = [];
+  for (const s of race.world.segments) { s.slope = 0; s.terrain = "piste_rapide"; s.width = "large"; }
+  for (const p of race.world.points) p.curvature = 0;
+  car.rules = [
+    { channel: 5, enabled: true, conditions: [], action: { kind: "allure", level: "attaque" }, effect: { kind: "default" }, mode: "persistante" },
+    { channel: 6, enabled: true, conditions: [], action: { kind: "risque", level: "haut" }, effect: { kind: "default" }, mode: "persistante" }];
+  let t100 = 0, t200 = 0, vmax = 0;
+  for (let t = 1; t <= 150 * 30; t++) {
+    race.step();
+    const v = car.speedKmh;
+    if (!t100 && v >= 100) t100 = t / 30;
+    if (!t200 && v >= 200) t200 = t / 30;
+    if (v > vmax) vmax = v;
+  }
+  assert.ok(t100 > 5.5 && t100 < 8.5, `0-100 km/h en ${t100.toFixed(2)} s (cible ~7 s)`);
+  assert.ok(t200 > 0 && t200 < 36, `0-200 km/h en ${t200 ? t200.toFixed(2) : "JAMAIS"} s (cible ~30 s)`);
+  assert.ok(vmax >= 240, `pointe ${vmax.toFixed(1)} km/h (cible ~250)`);
+});
+
+// ===== (patch 8) HYSTÉRÉSIS DE CIBLE: pas d'alternance accélérateur/frein ====
+// Un humain ne pilote pas à 30 Hz. Avant: jusqu'à 7 inversions PÉDALES PAR
+// SECONDE en virage (126 en 20 min, dont 111 en virage); après hystérésis +
+// côter: 44 en 20 min, pire seconde 1. Le seuil du test: aucune seconde de
+// la simulation ne dépasse 4 inversions (humain ~3-4/s max), et le total
+// reste modeste sur 10 min en monde réel.
+test("hystérésis de cible: pas de pompage accélérateur/frein en virage", () => {
+  const race = new Race({ seedText: "hyst-pompage", targetHours: 168, startIntervalSeconds: 0, programWindowMinutes: 60, closureDelayHours: 24 });
+  race.addPlayer("reg", "Reg", "#111");
+  race.start();
+  const car = race.cars[0];
+  car.rules = [
+    { channel: 5, enabled: true, conditions: [], action: { kind: "allure", level: "normale" }, effect: { kind: "default" }, mode: "persistante" },
+    { channel: 6, enabled: true, conditions: [], action: { kind: "risque", level: "normal" }, effect: { kind: "default" }, mode: "persistante" }];
+  let pedal = 0; // 1 = accélérateur, -1 = frein, 0 = pieds levés
+  let flips = 0, flipsThisSec = 0, worstSec = 0, curSec = -1;
+  for (let t = 1; t <= 10 * 60 * 30; t++) {
+    race.step();
+    const sec = Math.floor(t / 30);
+    if (sec !== curSec) { curSec = sec; worstSec = Math.max(worstSec, flipsThisSec); flipsThisSec = 0; }
+    const m = car.brake > 0.1 ? -1 : car.throttle > 0.1 ? 1 : 0;
+    if (m !== 0 && pedal !== 0 && m !== pedal) { flips++; flipsThisSec++; }
+    if (m !== 0) pedal = m;
+  }
+  worstSec = Math.max(worstSec, flipsThisSec);
+  assert.ok(worstSec <= 4, `pire seconde: ${worstSec} inversions pédale (humain ~3-4/s max; avant: 7)`);
+  assert.ok(flips <= 60, `${flips} inversions en 10 min (avant: ~63 en 10 min, dont la plupart en virage)`);
 });

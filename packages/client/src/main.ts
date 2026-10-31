@@ -168,6 +168,25 @@ const CAR_WIDTH_M = 1.9; // largeur de caisse — contact moteur si écart laté
 function hourOfDay(tick: number): number {
   return (8 + tick / TICKS_PER_HOUR) % 24;
 }
+// (patch 8) UNE seule courbe jour/nuit partagée par le rendu du monde ET la
+// boucle principale — avant, deux formules distinctes (0.62 et 0.75) donnaient
+// deux nuits différentes selon l'endroit du code. Nuit pleine 21h-5h,
+// transitions 19-21h et 5-7h.
+const DAY_DARK_MAX = 0.62;
+function dayDark(hour: number): number {
+  if (hour >= 21 || hour < 5) return DAY_DARK_MAX;
+  if (hour >= 19) return ((hour - 19) / 2) * DAY_DARK_MAX;
+  if (hour < 7) return ((7 - hour) / 2) * DAY_DARK_MAX;
+  return 0;
+}
+// teinte chaude d'AUBE (cloche sur 6h) et de CRÉPUSCULE (cloche sur 20h):
+// le ciel ROUGIT au lever/coucher — pas seulement "de moins en moins noir".
+function dayWarm(hour: number): number {
+  if (hour >= 19 && hour < 21.5) return Math.max(0, 1 - Math.abs(hour - 20) / 1.25);
+  if (hour >= 4.5 && hour < 7.5) return Math.max(0, 1 - Math.abs(hour - 6) / 1.25);
+  return 0;
+}
+
 
 function fmtHour(tick: number): string {
   const h = hourOfDay(tick);
@@ -963,7 +982,9 @@ let renderSpeed = 0; // vitesse de rendu lissée (km/h), suit lastKnownSpeed en 
 const pathChunks = new Map<number, any[]>();
 let lastFrame = 0;
 let dustParticles: { x: number; y: number; vx: number; vy: number; life: number }[] = [];
-let rainDrops: { x: number; y: number }[] = [];
+// (patch 8) gouttes individuelles: longueur et opacité variées (une pluie
+// uniforme de traits égaux paraissait artificielle à l'écran)
+let rainDrops: { x: number; y: number; len: number; a: number }[] = [];
 
 const WEATHER_FR: Record<string, string> = {
   clair: "Ciel dégagé", pluie_diluvienne: "Pluie diluvienne", tempete_sable: "Tempête de sable",
@@ -1304,7 +1325,7 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
 
   // ---------- NUIT: voile + cône de phares orienté ----------
   const hour = state ? hourOfDay(state.tick) : 12;
-  const dark = hour >= 21 || hour < 5 ? 0.62 : hour >= 19 ? ((hour - 19) / 2) * 0.62 : hour < 7 ? ((7 - hour) / 2) * 0.62 : 0;
+  const dark = dayDark(hour);
   if (dark > 0.03 && myPub) {
     ctx.fillStyle = `rgba(10,10,30,${dark})`;
     ctx.fillRect(0, 0, w, h);
@@ -1325,23 +1346,38 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
     ctx.fill();
     ctx.restore();
   }
+  // (patch 8) AUBE / CRÉPUSCULE: voile chaud horizont au lever (5-7h) et
+  // coucher (19-21h) du soleil — le ciel rougit PUIS la nuit tombe; avant,
+  // seule une opacité noire montait d'un coup.
+  const warm = dayWarm(hour);
+  if (warm > 0.02) {
+    const wg = ctx.createLinearGradient(0, 0, 0, h);
+    wg.addColorStop(0, `rgba(255,140,60,${(0.20 * warm).toFixed(3)})`);
+    wg.addColorStop(0.55, `rgba(255,100,40,${(0.10 * warm).toFixed(3)})`);
+    wg.addColorStop(1, `rgba(80,60,120,${(0.12 * warm).toFixed(3)})`);
+    ctx.fillStyle = wg;
+    ctx.fillRect(0, 0, w, h);
+  }
 
   // ---------- MÉTÉO ----------
   const weather = myPub?.weather ?? "clair";
   if (weather === "pluie_diluvienne" || weather === "grele") {
-    if (rainDrops.length < 110) for (let i = 0; i < 5; i++) rainDrops.push({ x: Math.random() * w, y: Math.random() * h });
-    ctx.strokeStyle = weather === "grele" ? "rgba(220,230,255,0.7)" : "rgba(160,190,230,0.55)";
-    ctx.lineWidth = weather === "grele" ? 2.5 : 1.2;
+    // (patch 8) pluie VIVANTE: 220 gouttes (au lieu de 110), longueur et
+    // opacité individuelles — les traits égaux paraissaient artificiels
+    if (rainDrops.length < 220) for (let i = 0; i < 8; i++) rainDrops.push({ x: Math.random() * w, y: Math.random() * h, len: 7 + Math.random() * 11, a: 0.35 + Math.random() * 0.45 });
+    const grele = weather === "grele";
+    ctx.lineWidth = grele ? 2.5 : 1.2;
     for (const d of rainDrops) {
-      d.y += (weather === "grele" ? 300 : 460) * dt;
+      d.y += (grele ? 300 : 400 + d.len * 12) * dt;
       d.x -= 60 * dt;
+      ctx.strokeStyle = grele ? `rgba(220,230,255,${Math.min(0.9, d.a + 0.25)})` : `rgba(160,190,230,${d.a.toFixed(2)})`;
       ctx.beginPath();
       ctx.moveTo(d.x, d.y);
-      ctx.lineTo(d.x - 3, d.y + 10);
+      ctx.lineTo(d.x - 3, d.y + d.len);
       ctx.stroke();
       if (d.y > h) { d.y = -10; d.x = Math.random() * (w * 1.1); }
     }
-    if (weather === "grele" && Math.random() < 0.008) {
+    if (grele && Math.random() < 0.008) {
       ctx.fillStyle = "rgba(255,255,200,0.7)";
       ctx.fillRect(0, 0, w, h);
     }
@@ -1356,9 +1392,39 @@ function drawFlatWorld(w: number, h: number, km: number, seg: any, myPub: CarPub
       ctx.fillRect(sx + (now / 3) % 30, sy, 14, 2);
     }
   }
+  if (weather === "vent_fort") {
+    // (patch 8) le vent fort n'était PAS RENDU (seul un texte l'annonçait):
+    // léger voile + rafales, stries pâles rapides en diagonale
+    ctx.fillStyle = "rgba(150,180,160,0.13)";
+    ctx.fillRect(0, 0, w, h);
+    ctx.lineWidth = 1.5;
+    for (let i = 0; i < 30; i++) {
+      const sx = ((now / 2.5 + i * 137) % (w + 200)) - 100;
+      const sy = (i * 61 + Math.sin(now / 400 + i) * 18 + h * 0.5) % h;
+      const len = 20 + (i % 3) * 14;
+      ctx.strokeStyle = `rgba(230,240,235,${(0.22 + (i % 4) * 0.08).toFixed(2)})`;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx - len, sy + len * 0.25);
+      ctx.stroke();
+    }
+  }
   if (weather === "brouillard") {
+    // (patch 8) voile plat conservé + NAPPES DÉRIVANTES: le brouillard a
+    // une profondeur, il ondule — avant, un rectangle gris plat
     ctx.fillStyle = "rgba(200,200,200,0.28)";
     ctx.fillRect(0, 0, w, h);
+    for (let i = 0; i < 3; i++) {
+      const yBase = (0.25 + i * 0.25) * h + Math.sin(now / 5000 + i * 2.1) * (h * 0.08);
+      const band = h * (0.16 + i * 0.03);
+      const pulse = 0.16 + 0.05 * Math.sin(now / 3000 + i * 1.7);
+      const fg = ctx.createLinearGradient(0, yBase - band, 0, yBase + band);
+      fg.addColorStop(0, "rgba(215,215,220,0)");
+      fg.addColorStop(0.5, `rgba(215,215,220,${pulse.toFixed(3)})`);
+      fg.addColorStop(1, "rgba(215,215,220,0)");
+      ctx.fillStyle = fg;
+      ctx.fillRect(0, yBase - band, w, band * 2);
+    }
   }
   if (weather === "canicule") {
     const hg = ctx.createLinearGradient(0, 0, 0, h);
@@ -1455,7 +1521,7 @@ function render(): void {
   const seg = state.world.segments[Math.min(state.world.segments.length - 1, Math.floor(km / 25))];
   const weather = myPub?.weather ?? "clair";
   const hour = hourOfDay(state.tick);
-  const dark = hour >= 21 || hour < 5 ? 0.75 : hour >= 19 ? ((hour - 19) / 2) * 0.75 : hour < 7 ? ((7 - hour) / 2) * 0.75 : 0;
+  const dark = dayDark(hour); // (patch 8) courbe partagée — avant 0.75 ici vs 0.62 dans le monde
 
     drawFlatWorld(w, h, km, seg, myPub, now, dt);
 
@@ -1636,25 +1702,50 @@ $("btn-planner").onclick = openPlanner;
 $("btn-close").onclick = closeFullscreen;
 
 // ===== Ambiance sonore (WebAudio procédural, sans fichiers) =====
+// (patch 8) le moteur chante le RÉGIME MOTEUR (hudFast.rpm, 30 Hz), pas la
+// vitesse: avant, un seul oscillateur grattait 45 Hz + 1,1 Hz par km/h —
+// la 6e à 40 km/h et la 2e à 130 sonnaient pareil. Désormais: harmoniques
+// multiples (rumble bas, ordre d'allumage, aigus de charge), le PASSAGE DE
+// VITESSE s'entend naturellement (le régime retombe au rapport supérieur),
+// et la CHARGE (pédale d'accélérateur) ouvre le filtre et monte les aigus —
+// moteur chargé ≠ moteur en léger. Pluie: le même bruit blanc, filtre bande.
 let audioCtx: AudioContext | null = null;
-let engineOsc: OscillatorNode | null = null;
+let engineOscs: { osc: OscillatorNode; gain: GainNode; mult: number }[] = [];
+let engineFilter: BiquadFilterNode | null = null;
 let engineGain: GainNode | null = null;
 let windGain: GainNode | null = null;
+let windFilter: BiquadFilterNode | null = null;
+let rainGain: GainNode | null = null;
 let soundOn = false;
 
 function startAudio(): void {
   if (audioCtx) return;
   audioCtx = new AudioContext();
-  // moteur : oscillateur grave dont la fréquence suit la vitesse
+  // moteur : 3 oscillateurs harmoniques derrière un filtre unique (la
+  // charge l'ouvre) — les gains relatifs fixent le timbre, les fréquences
+  // suivent toutes l'ordre d'allumage f0 = rpm/60 × 2 (4-cyl 4-temps)
   engineGain = audioCtx.createGain();
   engineGain.gain.value = 0;
-  engineGain.connect(audioCtx.destination);
-  engineOsc = audioCtx.createOscillator();
-  engineOsc.type = "sawtooth";
-  engineOsc.frequency.value = 55;
-  engineOsc.connect(engineGain);
-  engineOsc.start();
-  // vent : bruit blanc filtré
+  engineFilter = audioCtx.createBiquadFilter();
+  engineFilter.type = "lowpass";
+  engineFilter.frequency.value = 900;
+  engineFilter.connect(engineGain).connect(audioCtx.destination);
+  const harmonics: { type: OscillatorType; mult: number; g: number }[] = [
+    { type: "sine", mult: 1, g: 0.5 },    // rumble bas moteur
+    { type: "sawtooth", mult: 2, g: 1.0 }, // ordre d'allumage (dominant)
+    { type: "square", mult: 4, g: 0.25 },  // aigus de charge
+  ];
+  for (const h of harmonics) {
+    const osc = audioCtx.createOscillator();
+    osc.type = h.type;
+    osc.frequency.value = 30 * h.mult;
+    const gain = audioCtx.createGain();
+    gain.gain.value = h.g;
+    osc.connect(gain).connect(engineFilter);
+    osc.start();
+    engineOscs.push({ osc, gain, mult: h.mult });
+  }
+  // vent et pluie : le même bruit blanc, deux filtres
   const bufferSize = 2 * audioCtx.sampleRate;
   const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
   const data = noiseBuffer.getChannelData(0);
@@ -1662,22 +1753,44 @@ function startAudio(): void {
   const noise = audioCtx.createBufferSource();
   noise.buffer = noiseBuffer;
   noise.loop = true;
-  const windFilter = audioCtx.createBiquadFilter();
+  windFilter = audioCtx.createBiquadFilter();
   windFilter.type = "lowpass";
   windFilter.frequency.value = 400;
   windGain = audioCtx.createGain();
   windGain.gain.value = 0;
   noise.connect(windFilter).connect(windGain).connect(audioCtx.destination);
+  const rainFilter = audioCtx.createBiquadFilter();
+  rainFilter.type = "bandpass";
+  rainFilter.frequency.value = 3000;
+  rainFilter.Q.value = 0.7;
+  rainGain = audioCtx.createGain();
+  rainGain.gain.value = 0;
+  noise.connect(rainFilter).connect(rainGain).connect(audioCtx.destination);
   noise.start();
 }
 
 function updateAudio(myPub: CarPublic | undefined, weather: string, dark: number): void {
-  if (!soundOn || !audioCtx || !engineOsc || !engineGain || !windGain) return;
+  if (!soundOn || !audioCtx || !engineGain || !engineFilter || !windGain || !windFilter || !rainGain) return;
+  // le HUD 30 Hz (patch 7) donne régime + pédales de MA voiture; sans lui
+  // (avant le départ), hum grave au ralenti (900 tr/min)
+  const hud = hudFast && state && hudFast.tick >= state.tick - 3 ? hudFast : null;
+  const rpm = hud?.rpm ?? 900;
+  const throttle = hud?.throttle ?? 0;
   const speed = myPub?.speedKmh ?? 0;
-  engineOsc.frequency.value = 45 + (speed / 100) * 110;
-  engineGain.gain.value = speed > 1 ? 0.05 : 0.02;
+  const t = audioCtx.currentTime;
+  // ordre d'allumage: 2 combustions par tour de vilebrequin
+  const f0 = Math.max(20, (rpm / 60) * 2);
+  for (const h of engineOscs) h.osc.frequency.setTargetAtTime(f0 * h.mult, t, 0.02);
+  // la CHARGE ouvre filtre et volume; pied levé/frein: le moteur s'étouffe
+  const load = Math.max(throttle, speed > 1 ? 0.15 : 0);
+  engineFilter.frequency.setTargetAtTime(500 + 2200 * load * (0.4 + 0.6 * Math.min(1, rpm / 5200)), t, 0.05);
+  engineGain.gain.setTargetAtTime(load > 0 || speed > 1 ? 0.035 + 0.05 * load : 0.02, t, 0.05);
+  // vent: la coupure du filtre suit la vitesse (l'aéro s'entend monter)
   const storm = weather === "tempete_sable" || weather === "pluie_diluvienne" || weather === "grele" || weather === "vent_fort";
-  windGain.gain.value = (storm ? 0.09 : 0.02) + dark * 0.02;
+  windFilter.frequency.setTargetAtTime(250 + speed * 2.2, t, 0.1);
+  windGain.gain.setTargetAtTime((storm ? 0.09 : 0.02) + dark * 0.02, t, 0.2);
+  const raining = weather === "pluie_diluvienne" || weather === "grele";
+  rainGain.gain.setTargetAtTime(raining ? 0.05 : 0, t, 0.4);
 }
 
 $("btn-sound").addEventListener("click", () => {

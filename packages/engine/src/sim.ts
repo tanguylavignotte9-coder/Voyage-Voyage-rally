@@ -25,7 +25,7 @@ import {
   TOWING_SPEED_FACTOR, FUEL_DENSITY_KG_PER_L, WHEEL_DRIVE_EFF, GRAVITY,
   DRAFT_GAP_MIN_KM, DRAFT_GAP_MAX_KM, DRAFT_SPEED_DIFF, OVERTAKE_GAP_MAX_KM,
   TRACK_WIDTH_M, CAR_WIDTH_M, CAR_LEN_M, LAT_RATE_M_S, ALONGSIDE_OVERLAP_M, SIDE_CLEARANCE_M,
-  BRAKE_GRIP_SHARE, BRAKE_PLAN_SHARE, LOOKAHEAD_MAX_M, LOOKAHEAD_STEP_M, BRAKE_CONFIDENCE, OFF_TRACK_GRIP, DRIFT_OUT_MAX_M, PARKED_BRAKE,
+  BRAKE_GRIP_SHARE, BRAKE_PLAN_SHARE, LOOKAHEAD_MAX_M, LOOKAHEAD_STEP_M, BRAKE_CONFIDENCE, OFF_TRACK_GRIP, DRIFT_OUT_MAX_M, PARKED_BRAKE, PEDAL_HYST_BAND_MS,
   OVERTAKE_APPROACH_DECEL,
   OVERTAKE_ALONGSIDE_SPEED_DELTA, SIDE_EDGE_MARGIN_M, OVERTAKE_ACC_PER_S, OVERTAKE_ACC_RISK, OVERTAKE_ACC_CURVE_MIN,
   OVERTAKE_ACC_CURVE_GAIN, DEFEND_ACC_FACTOR, OFFLINE_SPEED_PENALTY, OVERTAKE_FAIL_COOLDOWN_S,
@@ -65,7 +65,13 @@ export function darknessFactor(hourOfDay: number): number {
 // la boîte: rapport optimal pour v (le plus haut sans sur-régimer,
 // rétrograde sous le ralenti)
 function gearFor(vMs: number): number {
-  let best = 0;
+  // (patch 8) si v dépasse le plafond de TOUS les rapports (même la 6e
+  // sur-régime), on reste en 6e sur limiteur — PAS en 1re: l'ancien
+  // fallback `best = 0` mettait la boîte en 1re à 250 km/h, et la charge
+  // organes (couple 1re au ralenti ≈ 15,6 kN > nominal transmission
+  // 9500 N) cassait la transmission au lancement, mesuré. En 6e bridée
+  // (tc = 0.15) la traction retombe et l'équilibre plafonne au limiteur.
+  let best = GEAR_RATIOS.length - 1;
   for (let gi = 0; gi < GEAR_RATIOS.length; gi++) {
     const rpm = vMs / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI);
     if (rpm <= ENGINE_REDLINE_RPM * 0.98) best = gi;
@@ -129,8 +135,27 @@ export function engineEquilibrium(car: CarState, seg: TerrainSegment, weather: s
   const maxTractionF = WHEEL_DRIVE_EFF * (LATERAL_GRIP[seg.terrain] ?? 0.5)
     * ((wearFactor(car.organs.pneus_av) + wearFactor(car.organs.pneus_ar)) / 2)
     * (WEATHER_GRIP_EFFECT[weather] ?? 1.0) * mass * GRAVITY;
+  // (patch 8) plafond physique: la 6e sur-régime bride la vitesse — une
+  // voiture dont la puissance dépasse ce que la 6e absorbe sous la zone
+  // rouge croise à ~243 km/h SUR LIMITEUR. Sans ce plafond, l'itération
+  // oscille autour de la discontinuité de la courbe (tc 0,95 sous le
+  // limiteur, 0,15 au-dessus) et ne converge plus — mesuré: v_eq aléatoire
+  // entre 50 et 100 m/s selon l'itération où elle s'arrête.
+  const vCeilTop = ENGINE_REDLINE_RPM * 0.98 / 60 * 2 * Math.PI * WHEEL_RADIUS_M
+    / (GEAR_RATIOS[GEAR_RATIOS.length - 1] * GEAR_FINAL_DRIVE);
   let v = 20;
+  // (patch 8) amortissement ADAPTATIF: quand la voiture est surpuissante pour
+  // la 6e, le fixpoint est proche du limiteur, là où la courbe de couple
+  // plonge (tc 0,75 -> 0,15): la map vNext sur-amplifie et l'itération
+  // cycle {60,25 ; 67,5} m/s sans converger — v_eq dépendait du nombre
+  // d'itérations, mesuré. À chaque changement de signe du delta on amortit
+  // deux fois plus fort: le cycle se resserre sur le fixpoint physique
+  // (fGear = traînée). En régime sous-critique (moteur d'origine) le delta
+  // ne change jamais de signe: comportement IDENTIQUE à avant.
+  let damp = CONVERGENCE_DAMPING;
+  let prevDelta = 0;
   for (let i = 0; i < 14; i++) {
+    v = Math.min(v, vCeilTop);
     const fTotal = Math.max(50, rollingF + slopeF + kAero * v * v);
     const gi = gearFor(v);
     const rpm = v / WHEEL_RADIUS_M * 60 * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE / (2 * Math.PI);
@@ -138,10 +163,13 @@ export function engineEquilibrium(car: CarState, seg: TerrainSegment, weather: s
       * TRANSMISSION_EFF / WHEEL_RADIUS_M * throttleShare;
     const fTraction = Math.min(fGear, maxTractionF);
     const vNext = (fTraction * v) / fTotal * CONVERGENCE_EFF + CONVERGENCE_V_MIN;
-    v = v + (vNext - v) * CONVERGENCE_DAMPING;
-    if (Math.abs(vNext - v) < CONVERGENCE_EPS) break;
+    const delta = vNext - v;
+    if (prevDelta !== 0 && Math.sign(delta) !== Math.sign(prevDelta)) damp *= 0.5;
+    v = v + delta * damp;
+    prevDelta = delta;
+    if (Math.abs(delta) < CONVERGENCE_EPS) break;
   }
-  return v;
+  return Math.min(v, vCeilTop);
 }
 
 // Limite de virage (m/s) à la position km — la formule d'adhérence existante,
@@ -246,7 +274,35 @@ function dynamicSpeed(car: CarState, ctx: SimContext, seg: TerrainSegment, weath
   const fGear = torqueCurve(rpm) * ENGINE_MAX_TORQUE_NM * GEAR_RATIOS[gi] * GEAR_FINAL_DRIVE
     * TRANSMISSION_EFF / WHEEL_RADIUS_M * throttleShare;
   const Fmax = Math.min(fGear, WHEEL_DRIVE_EFF * muEff * mass * g); // borné traction
-  if (v < vTarget) {
+  // (patch 8) HYSTÉRÉSIS DE CIBLE: un humain ne pilote pas à 30 Hz — il
+  // garde son pied. La cible oscille de ±0,5 m/s autour de la vitesse réelle
+  // dans un virage (limite de virage + anticipation + trafic), et les
+  // pédales s'inversaient jusqu'à 7 FOIS PAR SECONDE (mesuré: 126 inversions
+  // en 20 min, dont 111 en virage). Le MODE pilote (freiner/tenir/accélérer)
+  // persiste tant que l'écart v-cible reste dans la bande morte
+  // (~1,75 m/s ≈ 6 km/h): le freinage anticipé du patch 7 (fort à l'entrée,
+  // relâché dedans) est conservé — le mode ne change que sur un vrai écart.
+  // Départ/arrêt: la voiture tient (TENIR), les pédales parking sont posées
+  // en tête de tick par ailleurs.
+  const band = PEDAL_HYST_BAND_MS;
+  const dv = vTarget - v;
+  let mode: "accel" | "hold" | "brake" = car.driveMode ?? "hold";
+  if (mode === "accel") {
+    // on lève le pied dès que la cible redescend dans la demi-bande
+    // (anticipation naturelle), on ne freine que sur un vrai écart
+    if (dv < -band) mode = "brake";
+    else if (dv < -band * 0.5) mode = "hold";
+  } else if (mode === "brake") {
+    // on reste "au frein" (pied posé, pression relâchée = côter) tant
+    // qu'on n'est pas franchement SOUS la cible: la sortie de virage
+    // seule déclenche la ré-accélération
+    if (dv > band) mode = "accel";
+  } else { // TENIR: stable dans la bande, ne réagit qu'aux vrais écarts
+    if (dv > band) mode = "accel";
+    else if (dv < -band) mode = "brake";
+  }
+  car.driveMode = mode;
+  if (mode === "accel" && v < vTarget) {
     // ACCÉLÉRER (traction-borné), sans dépasser la cible: la remontée en
     // sortie de virage est progressive (F = m·a), plus de saut à l'équilibre
     const aWish = (vTarget - v) / dt;
@@ -255,7 +311,7 @@ function dynamicSpeed(car: CarState, ctx: SimContext, seg: TerrainSegment, weath
     // pédale: la part de la force disponible réellement employée
     car.throttle = Math.min(1, (mass * a + Fres) / Math.max(Fmax, 1));
     car.brake = 0;
-  } else if (v > vTarget) {
+  } else if (mode === "brake" && v > vTarget) {
     // FREINER: la décélération exigée par la cible (qui se resserre à
     // l'approche du virage → frein fort à l'ENTRÉE puis relâche dans le
     // virage — plus jamais "à fond tout le virage"), bornée par la capacité
@@ -264,9 +320,23 @@ function dynamicSpeed(car: CarState, ctx: SimContext, seg: TerrainSegment, weath
     car.brake = aBrakeMax > 0 ? aNeed / aBrakeMax : 1;
     car.throttle = 0;
   } else {
-    // TENIR la vitesse: accélérateur = frottements / force disponible
-    car.throttle = Math.min(1, Fres / Math.max(Fmax, 1));
-    car.brake = 0;
+    // TENIR / CÔTER (patch 8): à la cible, accélérateur = frottements /
+    // force disponible. LÉGÈREMENT AU-DESSUS (dv < 0) ou juste SOUS la
+    // cible en fin de freinage (mode brake): on lève simplement le pied —
+    // la traînée et le roulement font le travail, les freins restent au
+    // repos. Sans cet état, le mode TENIR ré-affichait l'accélérateur
+    // (0,82 à 168 km/h, mesuré) un tick après le freinage et les inversions
+    // accélérateur/frein explosaient (652 en 20 min). Un humain côte, il
+    // ne pompe pas les pédales. NB: le frein moteur n'est pas modélisé —
+    // en descente raide (Fres = 0) le côter ne décélère pas.
+    if (dv < 0 || mode === "brake") {
+      car.throttle = 0;
+      car.brake = 0;
+      v = Math.max(0, v - (Fres / mass) * dt);
+    } else {
+      car.throttle = Math.min(1, Fres / Math.max(Fmax, 1));
+      car.brake = 0;
+    }
   }
   // (la SURVITESSE → dérive extérieure est appliquée dans tickCarInternal,
   // APRÈS applyTrafficEffects: son recentrage vers l'axe (0,064 m/tick puis
