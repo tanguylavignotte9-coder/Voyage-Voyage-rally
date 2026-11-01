@@ -62,6 +62,7 @@ interface StateMsg {
   players: { id: string; pseudo: string; color: string; isAdmin?: boolean }[];
   challenges: any[];
   mine: MyCar | null;
+  mode?: string;
 }
 
 const BIOME_COLORS: Record<string, string> = {
@@ -100,6 +101,12 @@ function connect(): void {
     const msg = JSON.parse(ev.data);
     if (msg.type === "world_reset") {
       pathChunks.clear();
+      // Patch 9 : nouveau monde → payload continent périmé
+      continentPayload = null;
+      continentRoute = null;
+      continentOff = null;
+      continent2DCenter = null;
+      continentMode = false;
       camInit = false;
       return;
     }
@@ -112,6 +119,10 @@ function connect(): void {
       }
       return;
     }
+    if (msg.type === "continent") {
+      continentPayload = msg.payload;
+      return;
+    }
     if (msg.type === "hud") {
       // HUD conduite 30 Hz (patch 7): un par tick serveur, léger (gear/rpm/pédales)
       hudFast = msg;
@@ -120,6 +131,7 @@ function connect(): void {
     if (msg.type === "state") {
       msg.pathChunk = pathChunks;
       state = msg;
+      continentMode = state.mode === "continent";
       const myNew = state.cars.find((c) => c.playerId === myId);
       if (myNew) {
         // anti-saccade: le serveur émet un état toutes les ~100 ms et la
@@ -805,6 +817,7 @@ let mapDrag: { x: number; y: number } | null = null;
 
 function drawMap(m: CanvasRenderingContext2D, w: number, h: number): void {
   if (!state) return;
+  if (continentPayload) { drawContinentMap(m, w, h); return; }
   m.fillStyle = "#3a332a";
   m.fillRect(0, 0, w, h);
   const pts = state.pathSummary ?? [];
@@ -918,7 +931,10 @@ function drawMap(m: CanvasRenderingContext2D, w: number, h: number): void {
 // ===== Carte =====
 function openMap(): void {
   if (!state) return;
+  // Patch 9 : en mode continent, demander le payload 2D (une fois par monde)
+  if (continentMode && !continentPayload) send({ type: "get_continent" });
   mapCenterKm = null;
+  continent2DCenter = null;
   $("fullscreen").style.display = "block";
   const content = $("fscontent");
   content.innerHTML = "";
@@ -931,15 +947,32 @@ function openMap(): void {
   const redraw = () => drawMap(ctxM, c.width, c.height);
   redraw();
 
-  // molette = zoom autour du point souris
+  // molette = zoom autour du point souris (2D si payload continent)
   c.addEventListener("wheel", (e: WheelEvent) => {
     e.preventDefault();
+    if (continentPayload) {
+      const v = continentView(c.width, c.height);
+      const kmX = (e.offsetX - v.mapX(0)) / v.k;
+      const kmY = (e.offsetY - v.mapY(0)) / v.k;
+      const oldZ = continent2DZoom;
+      continent2DZoom = Math.max(1, Math.min(64, continent2DZoom * (e.deltaY > 0 ? 0.8 : 1.25)));
+      if (continent2DZoom !== oldZ) {
+        if (continent2DCenter) {
+          continent2DCenter = {
+            x: kmX - (kmX - continent2DCenter.x) * (oldZ / continent2DZoom),
+            y: kmY - (kmY - continent2DCenter.y) * (oldZ / continent2DZoom),
+          };
+        }
+        redraw();
+      }
+      return;
+    }
     const old = mapZoomLevel;
     mapZoomLevel = Math.max(1, Math.min(40, mapZoomLevel * (e.deltaY > 0 ? 0.8 : 1.25)));
     if (mapZoomLevel === old) return;
     redraw();
   }, { passive: false });
-  // drag = pan (déplace le focus en km le long du tracé)
+  // drag = pan (2D : km du continent ; 1D : le long du tracé)
   c.addEventListener("mousedown", (e: MouseEvent) => {
     mapDrag = { x: e.offsetX, y: e.offsetY };
     c.style.cursor = "grabbing";
@@ -948,22 +981,291 @@ function openMap(): void {
     if (mapDrag) { mapDrag = null; c.style.cursor = "grab"; }
   });
   c.addEventListener("mousemove", (e: MouseEvent) => {
-    if (!mapDrag) return;
+    const drag = mapDrag;
+    if (!drag) return;
+    if (continentPayload) {
+      const v = continentView(c.width, c.height);
+      continent2DCenter = {
+        x: v.cx - (e.offsetX - drag.x) / v.k,
+        y: v.cy - (e.offsetY - drag.y) / v.k,
+      };
+      mapDrag = { x: e.offsetX, y: e.offsetY };
+      redraw();
+      return;
+    }
     // pan en km: approx via la largeur visible = totalKm/zoom
-    const dpx = e.offsetX - mapDrag.x;
+    const dpx = e.offsetX - drag.x;
     const dkm = -(dpx / c.width) * (state!.world.totalKm / mapZoomLevel);
     const cur = mapCenterKm ?? state!.cars.find((x) => x.playerId === myId)?.positionKm ?? 0;
     mapCenterKm = Math.max(0, Math.min(state!.world.totalKm, cur + dkm));
     mapDrag = { x: e.offsetX, y: e.offsetY };
     redraw();
   });
-  c.addEventListener("dblclick", () => { mapCenterKm = null; redraw(); });
+  c.addEventListener("dblclick", () => {
+    mapCenterKm = null;
+    continent2DCenter = null; // recentre sur ma voiture
+    redraw();
+  });
   // refresh périodique (voitures avancent)
   setInterval(() => {
     if ($("fullscreen").style.display === "block" && !mapDrag) redraw();
   }, 2000);
 }
 
+// ===== PATCH 9 : carte 2D du continent (payload "continent" du serveur) =====
+let continentPayload: any = null;             // payload reçu du serveur
+let continentMode = false;                   // mode de la course (state.mode)
+let continentOff: HTMLCanvasElement | null = null;                    // fond 250×250 prérendu
+let continentRoute: { x: number; y: number; s: number }[] | null = null; // vraie géo + arc cumulé (km)
+let continent2DCenter: { x: number; y: number } | null = null;        // pan 2D (km du continent)
+let continent2DZoom = 1;                     // 1 = continent entier visible
+
+// 8 zones climatiques du proto (indices de zonesB64 ; 255 = océan)
+const ZONE2D_COLORS: string[] = [
+  "#9fb8c8", // 0 boréal
+  "#6fa05a", // 1 tempéré
+  "#b0b470", // 2 steppe
+  "#d9b36a", // 3 désert
+  "#c2a45e", // 4 sahel
+  "#3f8a52", // 5 tropical humide
+  "#b9bcc2", // 6 haute montagne
+  "#edf3f6", // 7 neiges éternelles
+];
+
+function b64ToU8(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+function b64ToI16(b64: string): Int16Array {
+  const u = b64ToU8(b64);
+  return new Int16Array(u.buffer, u.byteOffset, u.byteLength >> 1);
+}
+
+// Décode le payload UNE fois : fond prérendu (zones + hillshade + eau + routes
+// esquisse à 4 km/px) et itinéraire avec arc cumulé (pour projeter les km).
+function continentPrepare(): void {
+  if (!continentPayload || continentRoute) return;
+  const P = continentPayload;
+  const N = P.sizeKm / 4; // 250 px pour 1 000 km
+  const relief = b64ToU8(P.reliefB64);
+  const zones = b64ToU8(P.zonesB64);
+  const water = b64ToU8(P.waterB64);
+  const off = document.createElement("canvas");
+  off.width = N;
+  off.height = N;
+  const g = off.getContext("2d")!;
+  const img = g.createImageData(N, N);
+  for (let i = 0; i < N * N; i++) {
+    let r = 0, gg = 0, b = 0;
+    const wv = water[i];
+    if (wv === 3 || zones[i] === 255) {
+      r = 0x1d; gg = 0x3a; b = 0x55; // océan
+    } else {
+      const col = ZONE2D_COLORS[zones[i]] ?? "#b0b470";
+      r = parseInt(col.slice(1, 3), 16);
+      gg = parseInt(col.slice(3, 5), 16);
+      b = parseInt(col.slice(5, 7), 16);
+      const sh = 0.78 + (relief[i] / 255) * 0.5; // hillshade léger
+      r *= sh; gg *= sh; b *= sh;
+      if (wv === 2) { r = 0x2c; gg = 0x5a; b = 0x80; }       // lac
+      else if (wv === 1) { r = 0x3d; gg = 0x6c; b = 0x8f; }  // rivière
+    }
+    const o = i * 4;
+    img.data[o] = r;
+    img.data[o + 1] = gg;
+    img.data[o + 2] = b;
+    img.data[o + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  // réseau esquisse : gabarit sombre + cœur clair (itération 12bis du proto)
+  const rv = b64ToI16(P.roadsB64);
+  let p = 0;
+  for (const npts of P.roadsCount as number[]) {
+    if (p + npts * 2 > rv.length) break;
+    g.beginPath();
+    for (let i = 0; i < npts; i++) {
+      const x = rv[p++] / 40, y = rv[p++] / 40; // (km × 10) → km → px (÷4)
+      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.strokeStyle = "rgba(46,38,30,0.9)";
+    g.lineWidth = 1.6;
+    g.stroke();
+    g.strokeStyle = "#f0e8d8";
+    g.lineWidth = 0.7;
+    g.stroke();
+  }
+  continentOff = off;
+  // itinéraire du raid (vraie géométrie fine 250 m) + arc cumulé
+  const r = b64ToI16(P.routeB64);
+  const pts: { x: number; y: number; s: number }[] = [];
+  let s = 0;
+  for (let i = 0; i + 1 < r.length; i += 2) {
+    const x = r[i] / 10, y = r[i + 1] / 10;
+    if (pts.length) s += Math.hypot(x - pts[pts.length - 1].x, y - pts[pts.length - 1].y);
+    pts.push({ x, y, s });
+  }
+  continentRoute = pts;
+}
+
+// km du guide → {x,y} sur la vraie géométrie fine (projection par arc).
+// L'arc du tracé fin et l'arc du guide (totalKm) diffèrent de ~1-3 % : décalage
+// géographique des voitures/stations de cet ordre, accepté au proto.
+function routeAt(km: number): { x: number; y: number } {
+  const RT = continentRoute!;
+  if (!RT || RT.length === 0) return { x: 0, y: 0 };
+  const total = state?.world.totalKm || continentPayload.totalKm || 1;
+  const s = Math.max(0, Math.min(1, km / total)) * RT[RT.length - 1].s;
+  let lo = 0, hi = RT.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (RT[mid].s < s) lo = mid + 1; else hi = mid;
+  }
+  const a = RT[Math.max(0, lo - 1)], b = RT[lo];
+  const t = b.s > a.s ? (s - a.s) / (b.s - a.s) : 0;
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+// Caméra 2D : suit ma voiture par défaut, pan/zoom utilisateur sinon.
+function continentView(w: number, h: number): { k: number; cx: number; cy: number; mapX: (x: number) => number; mapY: (y: number) => number } {
+  const P = continentPayload!;
+  const side = Math.min(w - 40, h - 40);
+  const k = side / (P.sizeKm / continent2DZoom);
+  const myPos = state?.cars.find((c) => c.playerId === myId);
+  const myPt = myPos ? routeAt(myPos.positionKm) : null;
+  if (continent2DCenter === null && myPt) continent2DCenter = { x: myPt.x, y: myPt.y };
+  const cx = continent2DCenter?.x ?? myPt?.x ?? P.sizeKm / 2;
+  const cy = continent2DCenter?.y ?? myPt?.y ?? P.sizeKm / 2;
+  return { k, cx, cy, mapX: (x: number) => w / 2 + (x - cx) * k, mapY: (y: number) => h / 2 + (y - cy) * k };
+}
+
+function drawContinentMap(m: CanvasRenderingContext2D, w: number, h: number): void {
+  if (!state || !continentPayload) return;
+  continentPrepare();
+  if (!continentOff || !continentRoute || continentRoute.length === 0) return;
+  const P = continentPayload;
+  const RT = continentRoute;
+  const v = continentView(w, h);
+  const k = v.k;
+  const mapX = v.mapX, mapY = v.mapY;
+
+  m.fillStyle = "#14181f";
+  m.fillRect(0, 0, w, h);
+  m.imageSmoothingEnabled = true;
+  m.drawImage(continentOff, mapX(0), mapY(0), P.sizeKm * k, P.sizeKm * k);
+
+  // itinéraire : couloir translucide puis trait (itération 12bis)
+  const step = Math.max(1, Math.floor(RT.length / 12000));
+  m.beginPath();
+  for (let i = 0; i < RT.length; i += step) {
+    const x = mapX(RT[i].x), y = mapY(RT[i].y);
+    if (i === 0) m.moveTo(x, y); else m.lineTo(x, y);
+  }
+  m.lineJoin = "round";
+  m.lineCap = "round";
+  m.strokeStyle = "rgba(255, 217, 90, 0.28)";
+  m.lineWidth = 7;
+  m.stroke();
+  m.strokeStyle = "#ffd95a";
+  m.lineWidth = 2.4;
+  m.stroke();
+
+  // localités (payload : km)
+  m.font = "10px sans-serif";
+  for (const city of P.cities ?? []) {
+    if (city.size < 2 && continent2DZoom < 3) continue;
+    const x = mapX(city.x), y = mapY(city.y);
+    m.fillStyle = "#efe8dc";
+    m.beginPath();
+    m.arc(x, y, Math.min(4, 1.5 + city.size / 3), 0, Math.PI * 2);
+    m.fill();
+    if (continent2DZoom > 4) m.fillText(city.name, x + 6, y + 3);
+  }
+  if (continent2DZoom >= 2) {
+    for (const p of P.pois ?? []) {
+      const x = mapX(p.x), y = mapY(p.y);
+      m.fillStyle = "#f2b134";
+      m.fillRect(x - 1.5, y - 1.5, 3, 3);
+      if (continent2DZoom > 6) {
+        m.fillStyle = "#ffe08a";
+        m.fillText(p.name, x + 5, y - 4);
+      }
+    }
+  }
+
+  // stations (km → projection sur la vraie géométrie)
+  const iconSize = Math.min(16, Math.max(10, 14 / Math.sqrt(continent2DZoom)));
+  m.font = iconSize + "px sans-serif";
+  for (const s of state.world.stations) {
+    const pos = routeAt(s.km);
+    const x = mapX(pos.x), y = mapY(pos.y);
+    m.fillStyle = "#fff";
+    m.fillText("⛽", x - iconSize / 2, y - 8);
+    if (s.hasHotel) m.fillText("🏨", x + iconSize / 2, y - 8);
+    if (continent2DZoom > 2) {
+      m.font = "9px sans-serif";
+      m.fillText(s.name, x - 18, y - 22);
+      m.font = iconSize + "px sans-serif";
+    }
+  }
+  // villages (x,y en m dans le monde) + gués
+  if (continent2DZoom > 1.5) {
+    for (const vil of state.world.villages ?? []) {
+      m.fillText("🏠", mapX(vil.x / 1000) - 5, mapY(vil.y / 1000) + 14);
+    }
+    for (const riv of state.world.rivers ?? []) {
+      const x = mapX(riv.x / 1000), y = mapY(riv.y / 1000);
+      m.fillStyle = "#9fd4ff";
+      m.fillText("≈", x - 5, y + 6);
+      if (continent2DZoom > 8) m.fillText(riv.name, x + 6, y - 4);
+    }
+  }
+  // fronts météo
+  const FRONT_COLORS2: Record<string, string> = {
+    pluie_diluvienne: "rgba(80,120,220,0.35)", tempete_sable: "rgba(210,160,80,0.4)",
+    canicule: "rgba(230,120,40,0.25)", froid_intense: "rgba(160,200,255,0.3)",
+    brouillard: "rgba(200,200,200,0.3)", vent_fort: "rgba(150,180,160,0.25)",
+    grele: "rgba(190,210,255,0.4)", piste_endommagee: "rgba(120,60,40,0.5)",
+  };
+  m.font = "10px sans-serif";
+  for (const f of state.fronts ?? []) {
+    if (state.tick < f.startTick || state.tick > f.endTick) continue;
+    const pos = routeAt(f.km);
+    const fx = mapX(pos.x), fy = mapY(pos.y);
+    m.fillStyle = FRONT_COLORS2[f.kind] ?? "rgba(150,150,150,0.3)";
+    const fr = Math.max(3, f.radiusKm * k);
+    m.beginPath();
+    m.arc(fx, fy, fr, 0, Math.PI * 2);
+    m.fill();
+    m.fillStyle = "#fff";
+    m.fillText(WEATHER_ICON[f.kind] ?? "?", fx - 6, fy - fr - 4);
+  }
+  // voitures (projection par arc : décalage ~1-3 %, voir routeAt)
+  for (const car of state.cars) {
+    const pos = routeAt(car.positionKm);
+    const x = mapX(pos.x), y = mapY(pos.y);
+    m.fillStyle = car.color;
+    m.beginPath();
+    m.arc(x, y, 6, 0, Math.PI * 2);
+    m.fill();
+    m.strokeStyle = "#fff";
+    m.lineWidth = 1.5;
+    m.stroke();
+    const pp = state.players.find((q) => q.id === car.playerId);
+    m.fillStyle = "#fff";
+    m.font = "11px sans-serif";
+    m.fillText(pp?.pseudo ?? "", x + 9, y + 4);
+  }
+  const A = RT[0], B = RT[RT.length - 1];
+  m.fillStyle = "#fff";
+  m.font = "bold 13px sans-serif";
+  m.fillText("A", mapX(A.x) - 4, mapY(A.y) - 10);
+  m.fillText("B", mapX(B.x) - 4, mapY(B.y) - 10);
+  m.fillStyle = "#888";
+  m.font = "10px sans-serif";
+  m.fillText("Zoom ×" + continent2DZoom.toFixed(1) + " — molette: zoom, glisser: déplacer, double-clic: suivre", 10, h - 10);
+}
 function altAt(km: number): number {
   if (!state) return 0;
   const seg = state.world.segments[Math.min(state.world.segments.length - 1, Math.floor(km / 25))];

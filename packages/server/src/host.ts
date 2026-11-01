@@ -54,7 +54,7 @@ export class RaceHost {
     // relire 78 Mo de points — et remplace le monde léger du snapshot
     if (data.race.world) {
       const seed = data.race.world.seed;
-      data.race.world = generateWorld({ seed, targetHours: data.config.targetHours });
+      data.race.world = generateWorld({ seed, targetHours: data.config.targetHours, mode: data.config.mode, seedText: data.config.seedText });
     }
     Object.assign(host.race, data.race);
     host.chat = data.chat;

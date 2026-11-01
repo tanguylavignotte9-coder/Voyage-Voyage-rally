@@ -1,4 +1,5 @@
 import { Rng } from "./rng";
+import { generateContinent } from "./continent";
 import {
   GEN_END_SHARE, GEN_WAYPOINT_MIN_STEP_M, GEN_LATERAL_SPREAD, GEN_LATERAL_STEP, GEN_PROG_MIN_SHARE,
   GEN_WET_COST_THRESHOLD, GEN_DETAIL_EXPONENT, GEN_DETAIL_GAIN, GEN_DETOUR_COST,
@@ -13,6 +14,10 @@ export interface WorldGenParams {
   seed: number;
   targetHours: number;
   biomeWeights?: Partial<Record<Biome, number>>;
+  /** Patch 9 : "line" (défaut — monde v1) ou "continent" (moteur v2, monde 2D). */
+  mode?: "line" | "continent";
+  /** En mode continent : la graine TEXTE (celle du proto, ex. "vvr-continent-1"). */
+  seedText?: string;
 }
 
 // ============================================================================
@@ -597,6 +602,12 @@ export class WorldGenerator {
 }
 
 export function generateWorld(params: WorldGenParams): World {
+  // Patch 9 : aiguillage moteur v1 / v2. En mode continent, targetHours et
+  // biomeWeights sont ignorés (le monde 2D fait ~6 100 km ; la durée réelle
+  // dépend du terrain).
+  if (params.mode === "continent") {
+    return generateContinent(params.seedText ?? String(params.seed));
+  }
   const gen = new WorldGenerator(params);
   return gen.toWorld(params.seed);
 }

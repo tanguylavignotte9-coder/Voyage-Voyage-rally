@@ -6,6 +6,7 @@ import { Race, PRIME_HOUR } from "./race";
 import { darknessFactor, computeSpeed, applyTrafficEffects, resolveContactFault, SimContext, TICK_SECONDS, buildVariables, cornerLimitAt, powerGearFor } from "./sim";
 import { CAR_LEN_M, GEAR_RATIOS, GEAR_FINAL_DRIVE, WHEEL_RADIUS_M, ENGINE_IDLE_RPM, ENGINE_REDLINE_RPM, wearFactor } from "./calibration";
 import { CarState, DEFAULT_RULES, TICKS_PER_HOUR, OrganId, TerrainSegment } from "./types";
+import { generateContinent, buildContinentMap, __resetContinentCache } from "./continent";
 
 test("déterminisme: même graine = même monde", () => {
   const w1 = generateWorld({ seed: 42, targetHours: 10 });
@@ -777,4 +778,53 @@ test("hystérésis de cible: pas de pompage accélérateur/frein en virage", () 
   worstSec = Math.max(worstSec, flipsThisSec);
   assert.ok(worstSec <= 4, `pire seconde: ${worstSec} inversions pédale (humain ~3-4/s max; avant: 7)`);
   assert.ok(flips <= 60, `${flips} inversions en 10 min (avant: ~63 en 10 min, dont la plupart en virage)`);
+});
+// ===== PATCH 9 : contrat du monde continent (3 générations : ~20 s de tests) =====
+
+test("continent: contrat World — pas 20 m, km monotone, aucun NaN", () => {
+  __resetContinentCache();
+  const w = generateContinent("vvr-continent-1");
+  assert.ok(w.points.length > 100000, w.points.length + " points (attendu > 100 000)");
+  const d0 = w.points[1].km - w.points[0].km;
+  assert.ok(Math.abs(d0 - 0.02) < 1e-6, "pas de 20 m attendu, obtenu " + d0);
+  const last = w.points[w.points.length - 1];
+  for (let i = 0; i < w.points.length; i++) {
+    const p = w.points[i];
+    assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.km) && Number.isFinite(p.alt), "point " + i + " : coordonnée non finie");
+    if (i > 0) assert.ok(p.km >= w.points[i - 1].km, "km non monotone au point " + i);
+  }
+  assert.equal(w.totalKm, Math.ceil(last.km));
+  assert.ok(w.stations.length > 50, w.stations.length + " stations (attendu > 50)");
+  for (let i = 1; i < w.stations.length; i++) {
+    assert.ok(w.stations[i].km >= w.stations[i - 1].km, "stations non triées à " + i);
+  }
+  const coverEnd = w.biomeZones.reduce((mx, z) => Math.max(mx, z.endKm), 0);
+  assert.ok(coverEnd >= last.km - 1, "biomeZones s'arrêtent à " + coverEnd + " km < " + last.km);
+  for (const v of w.villages) {
+    assert.ok(v.km >= -0.5 && v.km <= last.km + 1, "village hors bornes : " + v.name + " @" + v.km + " km");
+  }
+  assert.ok(w.segments.length > 1000, w.segments.length + " segments 5 km (attendu > 1000)");
+});
+
+test("continent: déterminisme — même graine = même monde (cache purgé)", () => {
+  __resetContinentCache();
+  const a = generateContinent("sahara-2026-vvr");
+  __resetContinentCache();
+  const b = generateContinent("sahara-2026-vvr");
+  assert.equal(a.totalKm, b.totalKm);
+  assert.equal(a.points.length, b.points.length);
+  assert.equal(a.stations.length, b.stations.length);
+  assert.equal(a.villages.length, b.villages.length);
+  assert.equal(a.segments.length, b.segments.length);
+  assert.equal(a.points[1000].x, b.points[1000].x);
+  assert.equal(a.points[1000].alt, b.points[1000].alt);
+});
+
+test("continent: payload carte 2D (buildContinentMap, servi par le cache)", () => {
+  const p = buildContinentMap("sahara-2026-vvr");
+  assert.equal(p.sizeKm, 1000);
+  assert.ok(p.totalKm > 5000 && p.totalKm < 7000, "totalKm incohérent : " + p.totalKm);
+  assert.ok(p.routeB64.length > 1000, "routeB64 trop court");
+  assert.ok(p.roadsCount.length > 1500, p.roadsCount.length + " routes (attendu > 1500)");
+  assert.ok(p.cities.length > 1000, p.cities.length + " localités (attendu > 1000)");
 });

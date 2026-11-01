@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { RaceHost, RaceConfig } from "./host";
-import { CarState, PlayerRule, TICK_SECONDS, findContradictions, weatherAt } from "../../engine";
+import { CarState, PlayerRule, TICK_SECONDS, findContradictions, weatherAt, buildContinentMap } from "../../engine";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const SNAP_DIR = process.env.SNAP_DIR || path.join(process.cwd(), "data");
@@ -13,15 +13,20 @@ const args = process.argv.slice(2);
 let config: RaceConfig | null = null;
 
 if (args[0] === "create") {
+  // Patch 9 : "create continent <graine> <durée_h> …" active le moteur v2.
+  // L'ancienne forme "create <graine> …" reste le monde v1 (défaut "line").
+  const isContinent = args[1] === "continent";
+  const o = isContinent ? 1 : 0;
   config = {
-    seedText: args[1] || Math.random().toString(36),
-    targetHours: parseFloat(args[2] || "168"),
-    startIntervalSeconds: parseInt(args[3] || "60", 10),
-    programWindowMinutes: parseInt(args[4] || "60", 10),
-    closureDelayHours: parseFloat(args[5] || "24"),
-    accessCode: args[6] || "rally",
-    adminCode: args[7] || "admin-" + Math.random().toString(36).slice(2, 6),
+    seedText: args[1 + o] || Math.random().toString(36),
+    targetHours: parseFloat(args[2 + o] || "168"),
+    startIntervalSeconds: parseInt(args[3 + o] || "60", 10),
+    programWindowMinutes: parseInt(args[4 + o] || "60", 10),
+    closureDelayHours: parseFloat(args[5 + o] || "24"),
+    accessCode: args[6 + o] || "rally",
+    adminCode: args[7 + o] || "admin-" + Math.random().toString(36).slice(2, 6),
     adminPseudo: "admin",
+    mode: isContinent ? "continent" : "line",
   };
 }
 
@@ -123,6 +128,8 @@ function stateMsg(forPlayerId: string | null): any {
     type: "state",
     tick: host.race.tick,
     started: host.race.started,
+    // Patch 9 : le client sait s'il doit demander le payload continent.
+    mode: host.config.mode || "line",
     paused: host.race.paused,
     finished: host.race.finished,
     // Roadbook caché jusqu'à l'ouverture de la fenêtre de programmation (= premier joueur inscrit),
@@ -302,6 +309,7 @@ wss.on("connection", (ws) => {
           programWindowMinutes: host.config.programWindowMinutes,
           closureDelayHours: host.config.closureDelayHours,
           accessCode: host.config.accessCode,
+          mode: host.config.mode,
           adminCode: host.config.adminCode,
           adminPseudo: "admin",
         };
@@ -338,6 +346,14 @@ wss.on("connection", (ws) => {
         const toKm = fromKm + 4;
         const pts = host.race.world.points.filter((p: any) => p.km >= fromKm && p.km < toKm);
         ws.send(JSON.stringify({ type: "path_chunk", fromKm, points: pts }));
+        break;
+      }
+      case "get_continent": {
+        // Patch 9 : payload 2D du continent pour l'onglet carte (~640 Ko, une
+        // fois par client et par monde ; le cache serveur le sert instantanément)
+        if (host.config.mode === "continent") {
+          ws.send(JSON.stringify({ type: "continent", payload: buildContinentMap(host.config.seedText) }));
+        }
         break;
       }
     }

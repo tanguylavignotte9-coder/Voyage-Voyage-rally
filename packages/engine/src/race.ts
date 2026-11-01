@@ -11,6 +11,8 @@ export interface RaceParams {
   programWindowMinutes: number;
   closureDelayHours: number;
   biomeWeights?: Partial<Record<string, number>>;
+  /** Patch 9 : "line" (défaut) ou "continent". */
+  mode?: "line" | "continent";
 }
 
 export interface PlayerInfo {
@@ -52,7 +54,7 @@ export class Race {
     this.params = params;
     const seed = seedFromString(params.seedText);
     this.rng = new Rng(seed);
-    this.world = generateWorld({ seed, targetHours: params.targetHours, biomeWeights: params.biomeWeights as any });
+    this.world = generateWorld({ seed, targetHours: params.targetHours, biomeWeights: params.biomeWeights as any, mode: params.mode, seedText: params.seedText });
     this.fronts = generateWeatherFronts(this.world, this.rng, TICKS_PER_HOUR);
   }
 
